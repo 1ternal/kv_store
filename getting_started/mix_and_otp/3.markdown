@@ -1,0 +1,267 @@
+上一章,用agent实现了我们的"桶"。在第一章，曾说过要给每个“桶”命名来实现如下功能：
+
+```elixir
+CREATE shopping
+OK
+
+PUT shopping milk 1
+OK
+
+GET shopping milk
+1
+OK
+```
+
+每个“桶”都是一个进程，都有一个进程id(pid)，但是它们没有名字。我们在[进程](http://elixir-lang.org/getting_started/11.html)章节学习过名称注册(name registry),你可能倾向于使用它解决这个问题。例如，我们可以这样创建：
+
+```iex
+iex> Agent.start_link(fn -> [] end, name: :shopping)
+{:ok, #PID<0.43.0>}
+iex> KV.Bucket.put(:shopping, "milk", 1)
+:ok
+iex> KV.Bucket.get(:shopping, "milk")
+1
+```
+
+然而，这是一个很可怕的想法！在Elixir中本地名称必须是原子，这也就意味这我们需要将“桶”的名字（经常是从外部客户端接收）转换成原子。因为原子又不会被GC回收，所以**我们从不应该将用户输入转换为原子**。原子一旦被创建，永不被回收。从用户的输入生成原子意味着用户可以注入足够多的不同的名字消耗光内存。通常在消耗光内存之前，原子数量会达到Erlang虚拟机的最大上限，这必然会导致系统down掉。
+
+取而代之，我们将使用一个*注册进程*来保存”桶“名和pid组成的字典。
+
+这个注册表将会保证永远是最新的状态。例如，如果一个”桶“进程因为一个bug崩溃了，这个注册表必须清理命名字典来避免陈旧的项。在Elixir中，我们说注册表需要*监控(monitor)*每一个”桶“。
+
+我们将使用[GenServer](http://elixir-lang.org/docs/stable/elixir/GenServer.html)创建一个可以监控”桶“进程的注册表进程。Elixir和Erlang中，GenServer是构建这样一个通用服务的首选逻辑抽象。
+
+## 3.1 我们第一个通用服务器
+
+一个通用服务器由两部分实现：单一模块内的客户端API和服务器回调。用以下内容新建`lib/kv/registry.ex`文件：
+
+```elixir
+defmodule KV.Registry do
+  use GenServer
+
+  ## Client API
+
+  @doc """
+  Starts the registry.
+  """
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, :ok, opts)
+  end
+
+  @doc """
+  Looks up the bucket pid for `name` stored in `server`.
+
+  Returns `{:ok, pid}` if the bucket exists, `:error` otherwise.
+  """
+  def lookup(server, name) do
+    GenServer.call(server, {:lookup, name})
+  end
+
+  @doc """
+  Ensures there is a bucket associated to the given `name` in `server`.
+  """
+  def create(server, name) do
+    GenServer.cast(server, {:create, name})
+  end
+
+  ## Server Callbacks
+
+  def init(:ok) do
+    {:ok, HashDict.new}
+  end
+
+  def handle_call({:lookup, name}, _from, names) do
+    {:reply, HashDict.fetch(names, name), names}
+  end
+
+  def handle_cast({:create, name}, names) do
+    if HashDict.get(names, name) do
+      {:noreply, names}
+    else
+      {:ok, bucket} = KV.Bucket.start_link()
+      {:noreply, HashDict.put(names, name, bucket)}
+    end
+  end
+end
+```
+
+开始一个新的通用服务的第一个`start_link/1`函数接受三个参数：
+
+1. 服务器回调实现的模块名，也就是本例中的`__MODULE__`,意思是当前模块。
+
+2. 初始参数，本例中是原子`:ok`。
+
+3. 一个参数列表，例如服务器的名字。
+
+可以给通用服务器发送两种请求：call和cast。call是同步操作，服务器**必须**对这样的请求返回一个响应。cast是异步的，服务器不会发送回应。
+
+接下来俩函数`lookup/2`和`create/2`的职责是向服务器端发送请求。请求将会被表示为`handle_call/3`或`handle_cast/2`的第一个参数。也就是本例中的`{:lookup, name}`和`{:create, name}`。请求通常以元组表示，是为了在一个参数里给传递更多的信息。通常用元组第一个元素表示动作，其余信息放在后面。
+
+服务器端，我们使用各种回调来完成服务器初始化、终止和处理请求。这些回调都是可选的，目前我们只实现我们关心的就够了。
+
+第一个`init/1`函数回调，接收给予`GenServer.start_link/3`函数的参数，然后返回`{:ok, state}`, state是一个新的哈希字典(`HashDict`)。我们已经注意到了，`GenServer`的API如何将客户端/服务器端的分隔更明显。`start_link/3`发生在客户端,而`init/1` 是运行在服务器上相应的回调。
+
+对于`call`请求，我们必须实现一个`handle_call/3`回调来接收`request`，从哪儿接收到请求的(`_from`)和当前的服务器的状态(`name`)。`handle_call/3`回调返回一个`{:reply, reply, new_state}`格式的元组，reply是发送回客户端，new_state是服务器的新状态。
+
+对于`cast`请求，我们必须实现一个`handle_cast/2`回调来接收`request`请求和当前服务器的状态(`name`)。`handle_cast/2`回调返回`{:noreply, new_state}`格式的元组。
+
+`handle_call/3`和`handle_cast/2`也会返回其他格式的元组。我们也可以实现`terminate/2`和`code_change/3`回调。欢迎查看[GenServer完整文档](http://elixir-lang.org/docs/stable/elixir/GenServer.html)来学习更多。
+
+现在，让我们写一些测试来保证通用服务器以我们期望的方式工作。
+
+## 3.2 Testing a GenServer
+
+Testing a GenServer is not much different from testing an agent. We will spawn the server on a setup callback and use it throughout our tests. Create a file at `test/kv/registry_test.exs` with the following:
+
+```elixir
+defmodule KV.RegistryTest do
+  use ExUnit.Case, async: true
+
+  setup do
+    {:ok, registry} = KV.Registry.start_link
+    {:ok, registry: registry}
+  end
+
+  test "spawns buckets", %{registry: registry} do
+    assert KV.Registry.lookup(registry, "shopping") == :error
+
+    KV.Registry.create(registry, "shopping")
+    assert {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+
+    KV.Bucket.put(bucket, "milk", 1)
+    assert KV.Bucket.get(bucket, "milk") == 1
+  end
+end
+```
+
+Our test should pass right out of the box!
+
+To shutdown the registry, we are simply sending a `:shutdown` signal to its process when our test finishes. While this solution is ok for tests, if there is a need to stop a `GenServer` as part of the application logic, it is best to define a `stop/1` function that sends a `call` message causing the server to stop:
+
+```elixir
+## Client API
+
+@doc """
+Stops the registry.
+"""
+def stop(server) do
+  GenServer.call(server, :stop)
+end
+
+## Server Callbacks
+
+def handle_call(:stop, _from, state) do
+  {:stop, :normal, :ok, state}
+end
+```
+
+In the example above, the new `handle_call/3` clause is returning the atom `:stop`, along side the reason the server is being stopped (`:normal`), the reply `:ok` and the server state.
+
+## 3.3 The need for monitoring
+
+Our registry is almost complete. The only remaining issue is that the registry may become stale if a bucket stops or crashes. Let's add a test to `KV.RegistryTest` that exposes this bug:
+
+```elixir
+test "removes buckets on exit", %{registry: registry} do
+  KV.Registry.create(registry, "shopping")
+  {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+  Agent.stop(bucket)
+  assert KV.Registry.lookup(registry, "shopping") == :error
+end
+```
+
+The test above will fail on the last assertion as the bucket name remains in the registry even after we stop the bucket process.
+
+In order to fix this bug, we need the registry to monitor every bucket it spawns. Once we set up a monitor, the registry will receive a notification every time a bucket exits, allowing us to clean the dictionary up.
+
+Let's first play with monitors by starting a new console with `iex -S mix`:
+
+```iex
+iex> {:ok, pid} = KV.Bucket.start_link
+{:ok, #PID<0.66.0>}
+iex> Process.monitor(pid)
+#Reference<0.0.0.551>
+iex> Agent.stop(pid)
+:ok
+iex> flush()
+{:DOWN, #Reference<0.0.0.551>, :process, #PID<0.66.0>, :normal}
+```
+
+Note `Process.monitor(pid)` returns a unique reference that allows us to match upcoming messages to that monitoring reference. After we stop the agent, we can `flush()` all messages and notice a `:DOWN` message arrived, with the exact reference returned by monitor, notifying that the bucket process exited with reason `:normal`.
+
+Let's reimplement the server callbacks to fix the bug and make the test pass. First, we will modify the GenServer state to two dictionaries: one that contains `name -> pid` and another that holds `ref -> name`. Then we need to monitor the buckets on `handle_cast/2` as well as implement a `handle_info/2` callback to handle the monitoring messages. The full server callbacks implementation is shown below:
+
+```elixir
+## Server callbacks
+
+def init(:ok) do
+  names = HashDict.new
+  refs  = HashDict.new
+  {:ok, {names, refs}}
+end
+
+def handle_call({:lookup, name}, _from, {names, _} = state) do
+  {:reply, HashDict.fetch(names, name), state}
+end
+
+def handle_call(:stop, _from, state) do
+  {:stop, :normal, :ok, state}
+end
+
+def handle_cast({:create, name}, {names, refs}) do
+  if HashDict.get(names, name) do
+    {:noreply, {names, refs}}
+  else
+    {:ok, pid} = KV.Bucket.start_link()
+    ref = Process.monitor(pid)
+    refs = HashDict.put(refs, ref, name)
+    names = HashDict.put(names, name, pid)
+    {:noreply, {names, refs}}
+  end
+end
+
+def handle_info({:DOWN, ref, :process, _pid, _reason}, {names, refs}) do
+  {name, refs} = HashDict.pop(refs, ref)
+  names = HashDict.delete(names, name)
+  {:noreply, {names, refs}}
+end
+
+def handle_info(_msg, state) do
+  {:noreply, state}
+end
+```
+
+Observe that we were able to considerably change the server implementation without changing any of the client API. That's one of the benefits of explicitly segregating the server and the client.
+
+Finally, different from the other callbacks, we have defined a "catch-all" clause for `handle_info/2` that discards any unknown message. To understand why, let's move on to the next section.
+
+## 3.4 call, cast or info?
+
+So far we have used three callbacks: `handle_call/3`, `handle_cast/2` and `handle_info/2`. Deciding when to use each is straightforward:
+
+1. `handle_call/3` must be used for synchronous requests. This should be the default choice as waiting for the server reply is a useful backpressure mechanism.
+
+2. `handle_cast/2` must be used for asynchronous requests, when you don't care about a reply. A cast does not even guarantee the server has received the message and, for this reason, must be used sparingly. For example, the `create/2` function we have defined in this chapter should have used `call/2`. We have used `cast/2` for didactic purposes.
+
+3. `handle_info/2` must be used for all other messages a server may receive that are not sent via `GenServer.call/2` or `GenServer.cast/2`, including regular messages sent with `send/2`. The monitoring `:DOWN` messages are a perfect example of this.
+
+Since any message, including the ones sent via `send/2`, go to `handle_info/2`, there is a chance unexpected messages will arrive to the server. Therefore, if we don't define the `catch-all` clause, those messages could lead our supervisor to crash, because no clause would match.
+
+We don't need to worry about this for `handle_call/3` and `handle_cast/2` because these requests are only done via the `GenServer` API, so an unknown message is quite likely to be due to a developer mistake.
+
+## 3.5 Monitors or links?
+
+We have previously learned about links in the [Process chapter](/getting_started/11.html). Now, with the registry complete, you may be wondering: when should we use monitors and when should we use links?
+
+Links are bi-directional. If you link two process and one of them crashes, the other side will crash too (unless it is trapping exits). A monitor is uni-directional: only the monitoring process will receive notifications about the the monitored one. Simply put, use links when you want linked crashes, and monitors when you just want to be informed of crashes, exits, and so on.
+
+Returning to our `handle_cast/2` implementation, you can see the registry is both linking and monitoring the buckets:
+
+```elixir
+{:ok, pid} = KV.Bucket.start_link()
+ref = Process.monitor(pid)
+```
+
+This is a bad idea, as we don't want the registry to crash when a bucket crashes! We will explore solutions to this problem when we talk about supervisors. In a nutshell, we typically avoid creating new processes directly. Instead, we delegate this responsibility to supervisors. As we'll see, supervisors work with links, and that explains why link-based APIs (`spawn_link`, `start_link`, etc) are so prevalent in Elixir and OTP.
+
+Before jumping into supervisors, let's first explore event managers and event handlers with GenEvent.
