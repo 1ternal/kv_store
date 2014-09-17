@@ -1,0 +1,174 @@
+这一章，我们将创建一个叫`KV.Bucket`的模块。它的主要职责是允许以不同进程读写的方式存储键值对。
+
+如果你跳过了基础教程或很久之前看过，请重新再把[进程](http://elixir-lang.org/getting_started/11.html)读一遍，它是这一样的基础。
+
+## 2.1 状态的问题
+
+Elixir是不可变类型语言，也就是说不共享任何东西。如果我们想创建一个从多个地方可以存储和访问的"桶"，我们有以下两个选择：
+
+* 进程(process)
+* [ETS (Erlang Term Storage)](http://www.erlang.org/doc/man/ets.html)
+
+我们已经谈到过进程,ETS这个新东西稍后在本教程将会讲到。谈到进程，我们很少自己手写进程，而是使用Elixir和OTP提供的编程模式抽象：
+
+* [Agent](http://elixir-lang.org/docs/stable/elixir/Agent.html) - 简单的状态包装器
+* [GenServer](http://elixir-lang.org/docs/stable/elixir/GenServer.html) - 封装状态、提供同步和异步调用、支持代码重新加载等功能的“通用服务器(进程)”
+* [GenEvent](http://elixir-lang.org/docs/stable/elixir/GenEvent.html) - 允许向多个事件处理器发布事件的"通用事件"管理器。
+* [Task](http://elixir-lang.org/docs/stable/elixir/Task.html) - 允许生成进程，稍后很容易的接收结果的异步计算单元。
+
+本教程将讲到所有的这些抽象模式。记住它们全部是在进程之上，由虚拟机提供的几个简单的功能像`send`, `receive`, `spawn`和`link`实现的。
+
+## 2.2 Agents
+
+[Agents](http://elixir-lang.org/docs/stable/elixir/Agent.html)是简单的状态包装器。如果你只是需要一个保存状态的进程，agent是一个不错的选择。让我们在项目目录下打开一个`iex`会话：
+
+    $ iex -S mix
+
+调戏下agents:
+
+```iex
+iex> {:ok, agent} = Agent.start_link fn -> [] end
+{:ok, #PID<0.57.0>}
+iex> Agent.update(agent, fn list -> ["eggs"|list] end)
+:ok
+iex> Agent.get(agent, fn list -> list end)
+["eggs"]
+iex> Agent.stop(agent)
+:ok
+```
+
+我们以一个空列表为起始状态开启了一个agent。接下来，我们发送一个更新状态的命令，将新的东西添加到列表头部。最后，我们取回整个列表。一旦我们完成了操作，我们可以使用`Agent.stop/1`来终止这个agent进程。
+
+让我们用agent实现`KV.Bucket`。开始前，让我们先写一些测试。让我们以以下内容新建一个文件`test/kv/bucket_test.exs`(记住是`.exs`后缀)：
+
+```elixir
+defmodule KV.BucketTest do
+  use ExUnit.Case, async: true
+
+  test "stores values by key" do
+    {:ok, bucket} = KV.Bucket.start_link
+    assert KV.Bucket.get(bucket, "milk") == nil
+
+    KV.Bucket.put(bucket, "milk", 3)
+    assert KV.Bucket.get(bucket, "milk") == 3
+  end
+end
+```
+
+我们的第一个测试很直接。我们开启一个`KV.Bucket`然后执行一些`get/2`和`put/3`操作并断言结果。我们不需要明确停止agent，因为agent进程是链接到测试进程的，当测试结束的时候agent会自动关闭。
+
+同样注意到我们给`ExUnit.Case`传递了一个`async: true`选项。这个选项可以让同样使用`:async`选项的测试并行执行。这对多核的机器上提升测试速度非常有用。还需要注意的是，只在没有其他依赖或不更改任何全局值的时候设置`:async`选项。例如为了避免竞争危害，当测试需要写文件、注册进程、访问数据库时，不能设置为同步。
+
+不管是否同步，因为我们没有实现任何功能，新的测试很明显会失败。
+
+为了通过测试，让我们以以下内容新建`lib/kv/bucket.ex`文件。在看下面的代码之前，你自己可以随意实现`KV.Bucket`模块。
+
+```elixir
+defmodule KV.Bucket do
+  @doc """
+  Starts a new bucket.
+  """
+  def start_link do
+    Agent.start_link(fn -> HashDict.new end)
+  end
+
+  @doc """
+  Gets a value from the `bucket` by `key`.
+  """
+  def get(bucket, key) do
+    Agent.get(bucket, &HashDict.get(&1, key))
+  end
+
+  @doc """
+  Puts the `value` for the given `key` in the `bucket`.
+  """
+  def put(bucket, key, value) do
+    Agent.update(bucket, &HashDict.put(&1, key, value))
+  end
+end
+```
+
+根据上面定义的`KV.Bucket`模块，测试应该通过！记住，我们使用了哈希字典(HashDict)代替`Map`，因为目前的Elixir版本，map在大量键值的情况下性能不如哈希字典。
+
+## 2.3 ExUnit回调
+
+给`KV.Bucket`增加更多功能前，让我们来讨论下ExUnit回调。正如你所想，所有的`KV.Bucket`测试开始前都需要"桶"先开启，结束时关闭。幸运的是，ExUnit支持能让我们省略这样重复事情的回调。
+
+让我们用回调重写测试：
+
+```elixir
+defmodule KV.BucketTest do
+  use ExUnit.Case, async: true
+
+  setup do
+    {:ok, bucket} = KV.Bucket.start_link
+    {:ok, bucket: bucket}
+  end
+
+  test "stores values by key", %{bucket: bucket} do
+    assert KV.Bucket.get(bucket, "milk") == nil
+
+    KV.Bucket.put(bucket, "milk", 3)
+    assert KV.Bucket.get(bucket, "milk") == 3
+  end
+end
+```
+
+我们使用`setup/1`宏定义了一个回调。`setup/1`回调会在每个测试前在测试同样的进程里运行。
+
+我们需要从回调里把`bucket`的pid传递给测试这样一个机制，为此使用了*测试上下文(test context)*来达到这个目的。当我们从回调里返回`{:ok, bucket: bucket}`时，ExUnit回调将会把元组的第二个元素返回给测试上下文。在测试定义中匹配后，测试中就可以获取到对应的测试上下文中的map值。
+
+```elixir
+test "stores values by key", %{bucket: bucket} do
+  # `bucket` is now the bucket from the setup block
+end
+```
+
+你可以在[`ExUnit.Case`模块定义](http://elixir-lang.org/docs/stable/ex_unit/ExUnit.Case.html)中了解更多关于测试用例和[`ExUnit.Callbacks`文档](http://elixir-lang.org/docs/stable/ex_unit/ExUnit.Callbacks.html)了解更多测试回调。
+
+## 2.4 agent其他行为
+
+除了获取和更新agent的状态，agent也允许我们通过`Agent.get_and_update/2`函数，执行获取和更新两个操作。让我们实现从"桶"中删除一个键值，然后返回现在状态的函数`KV.Bucket.delete/2`：
+
+```elixir
+@doc """
+Deletes `key` from `bucket`.
+
+Returns the current value of `key`, if `key` exists.
+"""
+def delete(bucket, key) do
+  Agent.get_and_update(bucket, &HashDict.pop(&1, key))
+end
+```
+
+现在轮到你为上面的功能写测试了！还有，记得查看agent文档了解更多的内容。
+
+## 2.5 Agent中的客户端／服务器
+
+进入下一章前，让我们讨论下agent下客户端和服务器的区别。我们就以刚刚实现的`delete/2`函数为例：
+
+```elixir
+def delete(bucket, key) do
+  Agent.get_and_update(bucket, fn dict->
+    HashDict.pop(dict, key)
+  end)
+end
+```
+
+传递给agent的函数里的东西，都会在agent里执行。以此来看，agent是一个接收、响应我们的消息的进程，我们叫这个agent为Server。此函数外所有动作发生客户端。
+
+这是个很重要的区别。如果有耗时的操作,您必须考虑在客户端或服务器端上哪个更好。例如
+
+```elixir
+def delete(bucket, key) do
+  :timer.sleep(1000) # 延迟客户端
+  Agent.get_and_update(bucket, fn dict ->
+    :timer.sleep(1000) # 延迟服务器端
+    HashDict.pop(dict, key)
+  end)
+end
+```
+
+当服务器端在执行一个耗时的操作，所有到这个服务器端的其他请求只能等待这个操作完成，这很有可能造成客户端的超时。
+
+下一章我们将会了解"通用服务器"，客户端和服务器端的分割会更明显哟
