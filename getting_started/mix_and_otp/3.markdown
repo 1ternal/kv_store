@@ -109,9 +109,9 @@ end
 
 现在，让我们写一些测试来保证通用服务器以我们期望的方式工作。
 
-## 3.2 Testing a GenServer
+## 3.2 测试通用服务器
 
-Testing a GenServer is not much different from testing an agent. We will spawn the server on a setup callback and use it throughout our tests. Create a file at `test/kv/registry_test.exs` with the following:
+测试通用服务器与测试agent没有什么区别。我们将使用setup回调生成一个服务器端进程供测试使用。以下面的内容创建`test/kv/registry_test.exs`文件：
 
 ```elixir
 defmodule KV.RegistryTest do
@@ -134,9 +134,9 @@ defmodule KV.RegistryTest do
 end
 ```
 
-Our test should pass right out of the box!
+我们的测试应该直接通过！
 
-To shutdown the registry, we are simply sending a `:shutdown` signal to its process when our test finishes. While this solution is ok for tests, if there is a need to stop a `GenServer` as part of the application logic, it is best to define a `stop/1` function that sends a `call` message causing the server to stop:
+当测试结束的时候，我们简单的向注册表进程发送一个`:shutdown`信号来关闭它。这个方法在测试中没问题，但如果作为程序逻辑的一部分，我们想停止`GenServer`时，最好定义一个`stop/1`函数来发送信息来停止服务器进程。
 
 ```elixir
 ## Client API
@@ -155,11 +155,12 @@ def handle_call(:stop, _from, state) do
 end
 ```
 
-In the example above, the new `handle_call/3` clause is returning the atom `:stop`, along side the reason the server is being stopped (`:normal`), the reply `:ok` and the server state.
+上例中，新的`handle_call/3`函数返回元组`:stop`、服务器停止的原因(`:normal`)、回复客户端`:ok`和服务器目前的状态。
 
-## 3.3 The need for monitoring
+## 3.3 监控需求
 
 Our registry is almost complete. The only remaining issue is that the registry may become stale if a bucket stops or crashes. Let's add a test to `KV.RegistryTest` that exposes this bug:
+注册表功能差不多要完成了。唯一存在的问题是，如果“桶”停止或崩溃了，注册表的状态信息将会变得陈旧。让我们在`KV.RegistryTest`中增加一个测试
 
 ```elixir
 test "removes buckets on exit", %{registry: registry} do
@@ -170,11 +171,11 @@ test "removes buckets on exit", %{registry: registry} do
 end
 ```
 
-The test above will fail on the last assertion as the bucket name remains in the registry even after we stop the bucket process.
+上面这个测试将会在最后一个断言处失败，因为即使我们停止了“桶”进程，“桶”名称仍然在注册表进程状态中。
 
-In order to fix this bug, we need the registry to monitor every bucket it spawns. Once we set up a monitor, the registry will receive a notification every time a bucket exits, allowing us to clean the dictionary up.
+为了修复这个bug，我们需要从“桶”进程开始就进行监控。一旦我们设置好监控，每次“桶”进程退出，注册表都会接收到一个通知。这样我们就可以对状态字典进行清理。
 
-Let's first play with monitors by starting a new console with `iex -S mix`:
+先使用`iex -S mix`打开控制台，调戏下监控器。
 
 ```iex
 iex> {:ok, pid} = KV.Bucket.start_link
@@ -187,9 +188,9 @@ iex> flush()
 {:DOWN, #Reference<0.0.0.551>, :process, #PID<0.66.0>, :normal}
 ```
 
-Note `Process.monitor(pid)` returns a unique reference that allows us to match upcoming messages to that monitoring reference. After we stop the agent, we can `flush()` all messages and notice a `:DOWN` message arrived, with the exact reference returned by monitor, notifying that the bucket process exited with reason `:normal`.
+注意到`Process.monitor(pid)`返回一个唯一的引用，允许我们用它对稍后对收到的信息进行匹配。当我们停止agent之后，可以使用`flush()`激活所有信息，可以看到收到了与这个引用匹配的`:DOWN`信息，告诉我们“桶”进程是正常(`:normal`)退出的。
 
-Let's reimplement the server callbacks to fix the bug and make the test pass. First, we will modify the GenServer state to two dictionaries: one that contains `name -> pid` and another that holds `ref -> name`. Then we need to monitor the buckets on `handle_cast/2` as well as implement a `handle_info/2` callback to handle the monitoring messages. The full server callbacks implementation is shown below:
+让我们实现服务器端回调来修复这个bug并通过测试。首先，我们将通用服务器的状态修改成两个字典，一个包含`名称(name)->进程号(pid)`,另一个包含`引用(ref)->名称(name)`。然后在`handle_cast/2`监控“桶”，`handle_info/2`回调处理监控信息。所有的实现细节如下:
 
 ```elixir
 ## Server callbacks
@@ -231,37 +232,37 @@ def handle_info(_msg, state) do
 end
 ```
 
-Observe that we were able to considerably change the server implementation without changing any of the client API. That's one of the benefits of explicitly segregating the server and the client.
+观察到我们能够显著改变服务器实现,而不必更改任何客户端API。这是一个分割服务器和客户端很明显的好处。
 
-Finally, different from the other callbacks, we have defined a "catch-all" clause for `handle_info/2` that discards any unknown message. To understand why, let's move on to the next section.
+最后，与其他回调不同，我们定义了一个接受所有信息的函数`handle_info/2`来扔掉任何未知的信息。要明白为什么，让我们继续下一节。
 
-## 3.4 call, cast or info?
+## 3.4 使用call, cast或info?
 
-So far we have used three callbacks: `handle_call/3`, `handle_cast/2` and `handle_info/2`. Deciding when to use each is straightforward:
+目前为止，我们使用了`handle_call/3`, `handle_cast/2` 和 `handle_info/2`这三个回调函数，决定使用哪个也很简单:
 
-1. `handle_call/3` must be used for synchronous requests. This should be the default choice as waiting for the server reply is a useful backpressure mechanism.
+1. `handle_call/3` 必须用于同步请求。当明确需要服务器端发回响应时，它应该默认的选择。
 
-2. `handle_cast/2` must be used for asynchronous requests, when you don't care about a reply. A cast does not even guarantee the server has received the message and, for this reason, must be used sparingly. For example, the `create/2` function we have defined in this chapter should have used `call/2`. We have used `cast/2` for didactic purposes.
+2. `handle_cast/2` 必须用于异步请求，也就是说你不关心是否响应。异步甚至都不保证服务器端能接受到消息，基于这个原因，请谨慎使用。例如，这章定义的`create/2`函数应该使用`cast/2`,我们这里使用`cast/2`只是为了示例。
 
-3. `handle_info/2` must be used for all other messages a server may receive that are not sent via `GenServer.call/2` or `GenServer.cast/2`, including regular messages sent with `send/2`. The monitoring `:DOWN` messages are a perfect example of this.
+3. `handle_info/2` 必须用于接收不是通过`GenServer.call/2`或`GenServer.cast/2`发送的信息，包括`send/2`发送的正常信息。监控的`:DOWN`消息是一个很好的例子。
 
-Since any message, including the ones sent via `send/2`, go to `handle_info/2`, there is a chance unexpected messages will arrive to the server. Therefore, if we don't define the `catch-all` clause, those messages could lead our supervisor to crash, because no clause would match.
+因为包括`send/2`在内的任何信息都会由`handle_info/2`处理，所以服务器端可能会收到意料不到的信息。基于此，如果我们不定义一个接受所有信息(`catch-all`)的条件，这些信息就可能因为无法匹配导致我们的监控者崩溃。
 
-We don't need to worry about this for `handle_call/3` and `handle_cast/2` because these requests are only done via the `GenServer` API, so an unknown message is quite likely to be due to a developer mistake.
+对于`handle_call/3`和`handle_cast/2`无需担心，因为这些消息只能通过`GenServer`的API发送，所以未知信息很可能是由于开发者的错误导致的。
 
-## 3.5 Monitors or links?
+## 3.5 监控(monitor)或链接(link)？
 
-We have previously learned about links in the [Process chapter](/getting_started/11.html). Now, with the registry complete, you may be wondering: when should we use monitors and when should we use links?
+之前我们已经在[进程章节](http://elixir-lang.org/getting_started/11.html)学习过链接(links)。现在又完成了注册表进程，你可能会问，什么时候应该使用监控，什么时候应该使用链接？
 
-Links are bi-directional. If you link two process and one of them crashes, the other side will crash too (unless it is trapping exits). A monitor is uni-directional: only the monitoring process will receive notifications about the the monitored one. Simply put, use links when you want linked crashes, and monitors when you just want to be informed of crashes, exits, and so on.
+链接是双向的。如果你链接了两个进程，其中一个崩溃了，另外一个也会崩溃（非捕获退出）。监控是单独绑定：只有监控者会接收到被监控者的消息。简单来说，想接连崩溃使用链接，只是想收到崩溃或退出消息使用监控。
 
-Returning to our `handle_cast/2` implementation, you can see the registry is both linking and monitoring the buckets:
+回到我们实现的`handle_cast/2`，你可以看到注册表进程同时链接和监控着“桶”:
 
 ```elixir
 {:ok, pid} = KV.Bucket.start_link()
 ref = Process.monitor(pid)
 ```
 
-This is a bad idea, as we don't want the registry to crash when a bucket crashes! We will explore solutions to this problem when we talk about supervisors. In a nutshell, we typically avoid creating new processes directly. Instead, we delegate this responsibility to supervisors. As we'll see, supervisors work with links, and that explains why link-based APIs (`spawn_link`, `start_link`, etc) are so prevalent in Elixir and OTP.
+这是个糟糕的想法，因为我们不想在“桶”崩溃的时候注册表进程也崩溃！当谈到监控者的时候我们将探索这个问题的解决方法。概括来说，我们通常直接避免创建新的进程,而是将这个任务交给监控者。我们将看到，监控者是使用链接的，这也就解释了为什么基于链接的API在Elixir和OTP中如此普遍。
 
-Before jumping into supervisors, let's first explore event managers and event handlers with GenEvent.
+在我们讲监控者之前,我们先学习GenEvent的事件管理器和事件处理器。
