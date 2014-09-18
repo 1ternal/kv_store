@@ -1,6 +1,6 @@
 这一章，我们将创建一个叫`KV.Bucket`的模块。它的主要职责是允许以不同进程读写的方式存储键值对。
 
-如果你跳过了基础教程或很久之前看过，请重新再把[进程](http://elixir-lang.org/getting_started/11.html)读一遍，它是这一样的基础。
+如果你跳过了基础教程或很久之前看过，请重新再把[进程](http://elixir-lang.org/getting_started/11.html)读一遍，它是这一章的基础。
 
 ## 2.1 状态的问题
 

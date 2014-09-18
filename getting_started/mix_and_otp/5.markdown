@@ -1,0 +1,346 @@
+目前为止，我们的程序有一个事件管理器和一个注册表。对于“桶”进程，它可能不需要一百个也需要一打。虽然我们可能会认为我们的实现到目前为止很不错，但是天下没有无bug的软件，失败也一定会发生。
+
+当失败发生的时候，你的一个反应可能是：”让我们纠错“。但是，在elixir入门指南中我们了解到，与其他语言不同的是，elixir中我们没有防御性编程的习惯来纠错。反而，我们说，“快速失败”和“让它崩溃”。如果有bug导致我们的注册表崩溃，不用担心，因为我们将会设置一个监控者来重新启动一个全新的注册表副本。
+
+这一章，我们将要学习监控者(supervisors)和程序(applicatioins)。我们将创建不止一个，而是两个监控者来监控我们的进程。
+
+## 5.1 我们第一个监控者
+
+创建一个监控者与创建一个通用服务器没有什么不同。我们将使用[监控者(supervisor)](http://elixir-lang.org/docs/stable/elixir/Supervisor.html)行为模式在`lib/kv/supervisor.ex`文件中定义一个叫`KV.Supervisor`模块:
+
+```elixir
+defmodule KV.Supervisor do
+  use Supervisor
+
+  def start_link do
+    Supervisor.start_link(__MODULE__, :ok)
+  end
+
+  @manager_name KV.EventManager
+  @registry_name KV.Registry
+
+  def init(:ok) do
+    children = [
+      worker(GenEvent, [[name: @manager_name]]),
+      worker(KV.Registry, [@manager_name, [name: @registry_name]])
+    ]
+
+    supervise(children, strategy: :one_for_one)
+  end
+end
+```
+
+我们的监控器有两个子进程:事件管理器和注册表。常见的做法是给监控下的进程命名，这样其他的进程不用知道进程号，使用名称就可以访问它们了。这很有用，因为被监控的进程可能会崩溃，进程重启后它的进程号就会改变。我们使用模块属性`@manager_name`和`@registry_name`声明了监控的子进程，然后在worker定义中引用了它们。尽管使用模块属性声明监控的子进程不是必须的，但这么做代码清晰，容易阅读。
+
+例如，`KV.Registry`worker接收两个参数，第一个是时间管理器的名字，第二个是选项关键字列表(keyword list)。示例中我们设置选项为`[name: KV.Registry]`(使用我们之前定义过的模块属性`@registry_name`),来保证程序中我们可以使用`KV.Registry`名称获取到注册表。通常在模块定义好之后再将其命名为监控器的子进程，这样在一个实时的系统进行debug就很容易。
+
+监控器中定义监控子进程的顺序也非常重要。因为注册表依赖与事件管理器，我们必须先启动后者再启动前者。这也就是子进程列表中通用事件管理器`GenEvent`必须在注册表`KV.Registry`之前的原因。
+
+最后，我们将子进程列表和策略`:one_for_one`传递给`supervise/2`函数调用。
+
+当子进程崩溃的时候，监控器的策略决定怎么做。`:one_for_one`意味着当一个子进程挂了，只会重启一个代替它的进程。这个策略目前能说通。如果事件管理器崩溃了，没有理由去重启注册表，反过来也一样。然而，一旦我们增加更多的子进程，这些可能就会发生变化。本节稍后会讨论到监控器`Supervisor`行为所支持多种不同的策略。
+
+如果我们在项目目录下使用`iex -S mix`打开终端，我们可以手动启动监控器：
+
+```iex
+iex> KV.Supervisor.start_link
+{:ok, #PID<0.66.0>}
+iex> KV.Registry.create(KV.Registry, "shopping")
+:ok
+iex> KV.Registry.lookup(KV.Registry, "shopping")
+{:ok, #PID<0.70.0>}
+```
+
+当我们启动监控树后，事件管理器和注册表子进程也都自动启动了，也就不需要我们手动启动进程来创建“桶”了。
+
+实战中，我们很少手动启动监控树，取而代之的是作为程序的一部分以回调方式启动。
+
+## 5.2 理解程序
+
+我们一直在一个程序里工作。每次我们更改一个文件然后执行`mix compile`，会看到`Generated kv.app`这样一个编译信息输出。
+
+我们可以在`_build/dev/lib/kv/ebin/kv.app`找到生成的`.app`文件。让我们看一看它的内容：
+
+```erlang
+{application,kv,
+             [{registered,[]},
+              {description,"kv"},
+              {applications,[kernel,stdlib,elixir,logger]},
+              {vsn,"0.0.1"},
+              {modules,['Elixir.KV','Elixir.KV.Bucket',
+                        'Elixir.KV.Registry','Elixir.KV.Supervisor']}]}.
+```
+
+这个文件包含了Erlang数据（使用erlang语法写成）。尽管我们对erlang不是很熟悉，也很容易猜到这个文件保存了我们程序的定义。它包含了我们程序的版本`version`，所有定义过的模块和一个程序依赖列表，比如erlang的`kernel`和`elixir`本身，还有在`mix.exs`程序列表中指定的`logger`。
+
+每次对程序增加新模块的时候手动更新这个文件实在是太无聊。这也就是为什么mix为我们生成和维护它的原因。
+
+通过修改`mix.exs`文件中`application/0`函数的返回值，我们就可以自定义这个`.app`文件。接下来一节将会讲到这些内容。
+
+### 5.2.1 启动程序
+
+定义一个程序定义`.app`文件后，我们就可以以整体的方式启动和停止它。
+
+1. Mix为我们自动启动当前的程序
+
+2. 即使Mix不启动我们的程序，我们的程序在启动时也不需要做任何事情。
+
+不管怎样，让我们看看mix如何为我们启动程序。让我们使用`iex -S mix`启动项目终端然后尝试下面命令：
+
+```iex
+iex> Application.start(:kv)
+{:error, {:already_started, :kv}}
+```
+
+噢，它已经启动了。
+
+我们可以使用选项让它不要启动程序。尝试执行`iex -S mix run --no-start`：
+
+```elixir
+iex> Application.start(:kv)
+{:error, {:not_started, :logger}}
+```
+
+因为程序`:kv`的依赖（本例中是`:logger`)没有启动，所以这里会有个错误。Mix一般根据`mix.exs`定义，按程序的依赖层级依次启动。如果依赖于其他程序，它们也是这么做。但是因为我们传递了`--no-start`标记,这就要求我们要不按照正确的顺序手动启动，要不就像下面这样调用`Application.ensure_all_started`启动：
+
+```elixir
+iex> Application.ensure_all_started(:kv)
+{:ok, [:logger, :kv]}
+iex> Application.stop(:kv)
+18:12:10.698 [info] Application kv exited :stopped
+:ok
+```
+
+没有特别让人兴奋的事情发生，但是它告诉我们怎样控制程序。
+
+> 当你执行`iex -S mix`，相当于执行了`iex -S mix run`。所以当你开启mix时如果需要传递更多选项，你只需要输入`mix run`然后传递任何`run`命令能接收的选项。在终端中执行`mix help run`，你就可以找到更多关于`run`的信息。
+
+### 5.2.2 程序回调
+
+我们花费了很多时间谈论如果启动和停止程序，肯定有方法让程序开始的时候干写有用的事。确实，还真有！
+
+We can specify an application callback function. This is a function that will be invoked when the application starts. The function must return a result of `{:ok, pid}`, where `pid` is the process identifier of a supervisor process.
+我们可以指定一个程序回调函数。这个函数将会在启动时被调用。这个函数必须返回一个`{:ok, pid}`结果，pid就是监控器的进程号。
+
+我们可以分两步设置程序回调。首先打开`mix.exs`文件，修改`def application`成如下内容：
+
+```elixir
+def application do
+  [applications: [],
+   mod: {KV, []}]
+end
+```
+
+`:mod`选项代表“程序回调模块”(application callback module),后跟程序启动时传递的参数。程序回调函数可以是任何实现了[程序](http://elixir-lang.org/docs/stable/elixir/Application.html)抽象行为的模块。
+
+现在我们指定`KV`为回调模块，我们需要修改`lib/kv.ex`文件中的`KV`模块定义：
+
+```elixir
+defmodule KV do
+  use Application
+
+  def start(_type, _args) do
+    KV.Supervisor.start_link
+  end
+end
+```
+
+当我们`use Application`,我们只需要定义一个`start/2`函数。如果我们需要在程序停止的时候指定自定义行为，我们可以再定义一个`stop/1`函数。本例中，被`use Application`自动定义这个函数就够了。
+
+让我们再次使用`iex -S mix`打开项目控制台。将会看到一个叫`KV.Registry`的进程已经在运行了：
+
+```iex
+iex> KV.Registry.create(KV.Registry, "shopping")
+:ok
+iex> KV.Registry.lookup(KV.Registry, "shopping")
+{:ok, #PID<0.88.0>}
+```
+
+太棒了!
+
+### 5.2.3 Projects or applications?
+
+Mix makes a distinction between projects and applications. Based on the current contents of our `mix.exs` file, we would say we have a Mix project that defines the `:kv` application. As we will see in later chapters, there are projects that don't define any application.
+
+When we say "project," you should think about Mix. Mix is the tool that manages your project. It knows how to compile your project, test your project and more. It also knows how to compile and start the application relevant to your project.
+
+When we talk about applications, we talk about OTP. Applications are the entities that are started and stopped as a whole by the runtime. You can learn more about applications in the [docs for the Application module](/docs/stable/elixir/Application.html), as well as by running `mix help compile.app` to learn more about the supported options in `def application`.
+
+## 5.3 Simple one for one supervisors
+
+We have now successfully defined our supervisor which is automatically started (and stopped) as part of our application lifecycle.
+
+Remember however that our `KV.Registry` is both linking and monitoring bucket processes in the `handle_cast/2` callback:
+
+```elixir
+{:ok, pid} = KV.Bucket.start_link()
+ref = Process.monitor(pid)
+```
+
+Links are bi-directional, which implies that a crash in a bucket will crash the registry. Although we now have the supervisor, which guarantees the registry will be back up and running, crashing the registry still means we lose all data associating bucket names to their respective processes.
+
+In other words, we want the registry to keep on running even if a bucket crashes. Let's write a test:
+
+```elixir
+test "removes bucket on crash", %{registry: registry} do
+  KV.Registry.create(registry, "shopping")
+  {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+
+  # Kill the bucket and wait for the notification
+  Process.exit(bucket, :shutdown)
+  assert_receive {:exit, "shopping", ^bucket}
+  assert KV.Registry.lookup(registry, "shopping") == :error
+end
+```
+
+The test is similar to "removes bucket on exit" except that we are being a bit more harsh. Instead of using `Agent.stop/1`, we are sending an exit signal to shutdown the bucket. Since the bucket is linked to the registry, which is then linked to the test process, killing the bucket causes the registry to crash which then causes the test process to crash too:
+
+```
+1) test removes bucket on crash (KV.RegistryTest)
+   test/kv/registry_test.exs:52
+   ** (EXIT from #PID<0.94.0>) shutdown
+```
+
+One possible solution to this issue would be to provide a `KV.Bucket.start/0`, that invokes `Agent.start/1`, and use it from the registry, removing the link between registry and buckets. However, this would be a bad idea, because buckets would not be linked to any process after this change. This means that if someone stops the `kv` application, all buckets would remain alive as they are unreachable.
+
+We are going to solve this issue by defining a new supervisor that will spawn and supervise all buckets. There is one supervisor strategy, called `:simple_one_for_one`, that is the perfect fit for such situations: it allows us to specify a worker template and supervise many children based on this template.
+
+Let's define our `KV.Bucket.Supervisor` as follows:
+
+```elixir
+defmodule KV.Bucket.Supervisor do
+  use Supervisor
+
+  def start_link(opts \\ []) do
+    Supervisor.start_link(__MODULE__, :ok, opts)
+  end
+
+  def start_bucket(supervisor) do
+    Supervisor.start_child(supervisor, [])
+  end
+
+  def init(:ok) do
+    children = [
+      worker(KV.Bucket, [], restart: :temporary)
+    ]
+
+    supervise(children, strategy: :simple_one_for_one)
+  end
+end
+```
+
+There are two changes in this supervisor compared to the first one.
+
+First, we define a `start_bucket/1` function that will receive a supervisor and start a bucket process as a child of that supervisor. `start_bucket/1` is the function we are going to invoke instead of calling `KV.Bucket.start_link` directly in the registry.
+
+Second, in the `init/1` callback, we are marking the worker as `:temporary`. This means that if the bucket dies, it won't be restarted! That's because we only want to use the supervisor as a mechanism to group the buckets. The creation of buckets should always pass through the registry.
+
+Run `iex -S mix` so we can give our new supervisor a try:
+
+```iex
+iex> {:ok, sup} = KV.Bucket.Supervisor.start_link
+{:ok, #PID<0.70.0>}
+iex> {:ok, bucket} = KV.Bucket.Supervisor.start_bucket(sup)
+{:ok, #PID<0.72.0>}
+iex> KV.Bucket.put(bucket, "eggs", 3)
+:ok
+iex> KV.Bucket.get(bucket, "eggs")
+3
+```
+
+Let's change the registry to work with the buckets supervisor. We are going to follow the same strategy we did with the events manager, where we will explicitly pass the buckets supervisor pid to `KV.Registry.start_link/3`. Let's start by changing the setup callback in `test/kv/registry_test.exs` to do so:
+
+```elixir
+setup do
+  {:ok, sup} = KV.Bucket.Supervisor.start_link
+  {:ok, manager} = GenEvent.start_link
+  {:ok, registry} = KV.Registry.start_link(manager, sup)
+
+  GenEvent.add_mon_handler(manager, Forwarder, self())
+  {:ok, registry: registry}
+end
+```
+
+Now let's change the appropriate functions in `KV.Registry` to take the new supervisor into account:
+
+```elixir
+## Client API
+
+@doc """
+Starts the registry.
+"""
+def start_link(event_manager, buckets, opts \\ []) do
+  # 1. Pass the buckets supevisor as argument
+  GenServer.start_link(__MODULE__, {event_manager, buckets}, opts)
+end
+
+## Server callbacks
+
+def init({events, buckets}) do
+  names = HashDict.new
+  refs  = HashDict.new
+  # 2. Store the buckets supevisor in the state
+  {:ok, %{names: names, refs: refs, events: events, buckets: buckets}}
+end
+
+def handle_cast({:create, name}, state) do
+  if HashDict.get(state.names, name) do
+    {:noreply, state}
+  else
+    # 3. Use the buckets supervisor instead of starting buckets directly
+    {:ok, pid} = KV.Bucket.Supervisor.start_bucket(state.buckets)
+    ref = Process.monitor(pid)
+    refs = HashDict.put(state.refs, ref, name)
+    names = HashDict.put(state.names, name, pid)
+    GenEvent.sync_notify(state.events, {:create, name, pid})
+    {:noreply, %{state | names: names, refs: refs}}
+  end
+end
+```
+
+Those changes should be enough to make our tests pass! To complete our task, we just need to update our supervisor to also take the buckets supervisor as child.
+
+## 5.4 Supervision trees
+
+In order to use the buckets supervisor in our application, we need to add it as a child of `KV.Supervisor`. Notice we are beginning to have supervisors that supervise other supervisors, forming so-called "supervision trees."
+
+Open up `lib/kv/supervisor.ex`, add an additional module attribute for the buckets supervisor name, and change `init/1` to match the following:
+
+```elixir
+@manager_name KV.EventManager
+@registry_name KV.Registry
+@bucket_sup_name KV.Bucket.Supervisor
+
+def init(:ok) do
+  children = [
+    worker(GenEvent, [[name: @manager_name]]),
+    supervisor(KV.Bucket.Supervisor, [[name: @bucket_sup_name]]),
+    worker(KV.Registry, [@manager_name, @bucket_sup_name, [name: @registry_name]])
+  ]
+
+  supervise(children, strategy: :one_for_one)
+end
+```
+
+This time we have added a supervisor as child and given it the name of `KV.Bucket.Supervisor` (again, the same name as the module). We have also updated the `KV.Registry` worker to receive the bucket supervisor name as argument.
+
+Also remember that the order in which children are declared is important. Since the registry depends on the buckets supervisor, the buckets supervisor must be listed before it in the children list.
+
+Since we have added more children to the supervisor, it is important to evaluate if the `:one_for_one` strategy is still correct. One flaw that shows up right away is the relationship between registry and buckets supervisor. If the registry dies, the buckets supervisor must die too, because once the registry dies all information linking the bucket name to the bucket process is lost. If the buckets supervisor is kept alive, it would be impossible to reach those buckets.
+
+We could consider moving to another strategy like `:one_for_all`. The `:one_for_all` strategy kills and restarts all children whenever one of the children die. This change is not ideal either, because a crash in the registry should not crash the event manager. In fact, doing so would be harmful, as crashing the event manager would cause all installed event handlers to be removed.
+
+One possible solution to this problem is to create another supervisor that will supervise the registry and buckets supervisor with `:one_for_all` strategy, and have the root supervisor supervise both the event manager and the new supervisor with `:one_for_one` strategy. The proposed tree would have the following format:
+
+```
+* root supervisor [one_for_one]
+  * event manager
+  * supervisor [one_for_all]
+    * buckets supervisor [simple_one_for_one]
+      * buckets
+    * registry
+```
+
+You can take a shot at building this new supervision tree, but we will stop here. This is because in the next chapter we will make changes to the registry that will allow the registry data to be persisted, making the `:one_for_one` strategy a perfect fit.
+
+Remember, there are other strategies and other options that could be given to `worker/2`, `supervisor/2` and `supervise/2` functions, so don't forget to check out [the Supervisor module documentation](/docs/stable/elixir/Supervisor.html).
