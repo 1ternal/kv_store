@@ -1,0 +1,201 @@
+这一章，我们将会学习另外一个由Elixir和OTP提供的行为逻辑抽象GenEvent,它允许我们生成一个能够发布多个事件到多个事件处理器的事件管理器。
+
+有两个事件需要我们发布：一个是每次“桶”增加到注册表，另一个是从注册表中移除。
+
+## 4.1 事件管理器(GenEvent)
+
+让我们使用`iex -S mix`开启一个会话然后稍微了解下事件管理器的API:
+
+```elixir
+iex> {:ok, manager} = GenEvent.start_link
+{:ok, #PID<0.83.0>}
+iex> GenEvent.sync_notify(manager, :hello)
+:ok
+iex> GenEvent.notify(manager, :world)
+:ok
+```
+
+用`GenEvent.start_link/0`函数启动一个新的事件管理器。这就是启动一个管理器所有的要求。管理器创建之后，我们可以使用`GenEvent.notify/2`和`GenEvent.sync_notify/2`来发送通知。
+
+然而，因为事件管理器没有与任何事件处理器绑定，所以每个通知也不会发生任何事情。
+
+让我们在IEx中创建第一个事件处理器，发送所有的事件到指定进程：
+
+```iex
+iex> defmodule Forwarder do
+...>   use GenEvent
+...>   def handle_event(event, parent) do
+...>     send parent, event
+...>     {:ok, parent}
+...>   end
+...> end
+iex> GenEvent.add_handler(manager, Forwarder, self())
+:ok
+iex> GenEvent.sync_notify(manager, {:hello, :world})
+:ok
+iex> flush
+{:hello, :world}
+:ok
+```
+
+我们先创建一个处理器，然后调用`GenEvent.add_handler/3`函数和以下参数把它加入到管理器：
+
+1. 之前开始和链接的管理器
+2. 定义事件处理器的模块（叫`Forwarder`）
+3. 事件处理器的状态：（本例中是当前的进程号）
+
+加入事件处理器之后，我们可以看到调用`sync_notify/2`，`Forwarder`就可以成功的将事件前转到邮箱里。
+
+这儿有几个很重要的地方需要指出：
+
+1. 事件处理器与事件管理器运行在同一个进程
+2. `sync_notify/2`根据请求同步执行事件管理器
+3. `notify/2`异步执行事件处理器
+
+因此，`sync_notify/2`和`notify/2`与通用服务器的`call/2`和`cast/2`类似，一般建议使用`sync_notify/2`同步调用。同步调用以背压机制工作，当事件管理器无法更快的分发事件时，它会给调用者发送信息减少消息被发送的可能性。
+
+一定要去[模块文档](http://elixir-lang.org/docs/stable/elixir/GenEvent.html)看看通用事件管理器提供的其他功能。目前我们已经有了足够的知识来为我们的程序添加事件处理器。
+
+## 4.2 注册表事件
+
+为了发送事件，我们需要改变注册表进程来让它与事件管理器一起工作。我们可以让注册表进程启动时事件管理器也自动启动，例如在`init/1`回调中，更好的选择是将事件管理器的进程号/名称传递给`start_link`函数，从注册表进程中解耦启动事件管理器。
+
+先更改测试代码来展示我们想要注册表执行的行为。打开`test/kv/registry_test.exs`文件，修改已存在的`setup`调用，再增加一些新的测试：
+
+```elixir
+defmodule Forwarder do
+  use GenEvent
+
+  def handle_event(event, parent) do
+    send parent, event
+    {:ok, parent}
+  end
+end
+
+setup do
+  {:ok, manager} = GenEvent.start_link
+  {:ok, registry} = KV.Registry.start_link(manager)
+
+  GenEvent.add_mon_handler(manager, Forwarder, self())
+  {:ok, registry: registry}
+end
+
+test "sends events on create and crash", %{registry: registry} do
+  KV.Registry.create(registry, "shopping")
+  {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+  assert_receive {:create, "shopping", ^bucket}
+
+  Agent.stop(bucket)
+  assert_receive {:exit, "shopping", ^bucket}
+end
+```
+
+为了测试增加的功能，我们首先定义了一个和我们之前在IEx里写过的类似的一个转发者`Forwarder`，它是事件处理器。在`setup`里，我们首先启动事件管理器，然后把它作为一个参数传递给注册表，为了可以从测试进程里发送事件，最后给它增加一个事件处理器`Forwarder`。
+
+测试中，我们创建和停止“桶”进程，然后使用`assert_receive`来断言我们将收到`:create`和`:exit`信息。`assert_receive`有500毫秒的默认超时事件，对于测试是完全够了。同样注意，`assert_receive`期望的是一个模式而不是值，这也就是为什么我们使用`^bucket`来匹配对应的“桶”的进程号。
+
+最后,我们调用`GenEvent.add_mon_handler/3`,而不是`GenEvent.add_handler/3`。这个函数不仅增加处理器（这我们知道）还会告诉事件管理器来监控当前的进程。如果当前进程挂了，事件处理器也就自动被移除。这么做的原因是，在`Forwarder`这个例子，如果这些信息的接收者(self()/测试进程)不存在了，我们应该停止转发信息。
+
+Let's now change the registry to make the tests pass. Open up `lib/kv/registry.ex` and paste the new registry implementation below (comments inlined):
+让我们修改注册表代码来让测试通过。打开`lib/kv/registry.ex`文件，粘贴下面的实现代码（单行注释）：
+
+```elixir
+defmodule KV.Registry do
+  use GenServer
+
+  ## Client API
+
+  @doc """
+  Starts the registry.
+  """
+  def start_link(event_manager, opts \\ []) do
+    # 1. start_link now expects the event manager as argument
+    GenServer.start_link(__MODULE__, event_manager, opts)
+  end
+
+  @doc """
+  Looks up the bucket pid for `name` stored in `server`.
+
+  Returns `{:ok, pid}` in case a bucket exists, `:error` otherwise.
+  """
+  def lookup(server, name) do
+    GenServer.call(server, {:lookup, name})
+  end
+
+  @doc """
+  Ensures there is a bucket associated with the given `name` in `server`.
+  """
+  def create(server, name) do
+    GenServer.cast(server, {:create, name})
+  end
+
+  ## Server callbacks
+
+  def init(events) do
+    # 2. The init callback now receives the event manager.
+    #    We have also changed the manager state from a tuple
+    #    to a map, allowing us to add new fields in the future
+    #    without needing to rewrite all callbacks.
+    names = HashDict.new
+    refs  = HashDict.new
+    {:ok, %{names: names, refs: refs, events: events}}
+  end
+
+  def handle_call({:lookup, name}, _from, state) do
+    {:reply, HashDict.fetch(state.names, name), state}
+  end
+
+  def handle_cast({:create, name}, state) do
+    if HashDict.get(state.names, name) do
+      {:noreply, state}
+    else
+      {:ok, pid} = KV.Bucket.start_link()
+      ref = Process.monitor(pid)
+      refs = HashDict.put(state.refs, ref, name)
+      names = HashDict.put(state.names, name, pid)
+      # 3. Push a notification to the event manager on create
+      GenEvent.sync_notify(state.events, {:create, name, pid})
+      {:noreply, %{state | names: names, refs: refs}}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    {name, refs} = HashDict.pop(state.refs, ref)
+    names = HashDict.delete(state.names, name)
+    # 4. Push a notification to the event manager on exit
+    GenEvent.sync_notify(state.events, {:exit, name, pid})
+    {:noreply, %{state | names: names, refs: refs}}
+  end
+
+  def handle_info(_msg, state) do
+    {:noreply, state}
+  end
+end
+```
+
+修改的地方也比较简单。当`GenServer`初始化的时候，我们将接收到的事件管理器作为一个参数传递给`start_link`函数。我们也更改了cast和info来调用`GenEvent.sync_notify/2`函数。最后，我们有机会将服务器状态更改为map,以期以后更改注册表代码的时候更容易些。
+
+执行测试，所有的测试应该都重新变绿了。
+
+## 4.3 事件流(Event streams)
+
+最后一个值得探讨的功能是`GenEvent`有能力消费事件流。
+
+```elixir
+iex> {:ok, manager} = GenEvent.start_link
+{:ok, #PID<0.83.0>}
+iex> spawn_link fn ->
+...>   for x <- GenEvent.stream(manager), do: IO.inspect(x)
+...> end
+:ok
+iex> GenEvent.notify(manager, {:hello, :world})
+{:hello, :world}
+:ok
+```
+
+上面这个例子，我们新建了一个`GenEvent.stream(manager)`来返回一个事件到达时可以消费的枚举类(enumerable)的事件流(stream)。因为消费这样的事件是一个阻塞操作，我们生成了一个新的进程来消费它并将它打印输出到终端上，这就是我们想看到的行为。每次调用`sync_notify/2`或`notify/2`时，事件将会在原子`:ok`后打印在终端上。（也就是IEx将返回的通知函数结果打印在终端上）。
+
+Often event streams provide enough functionality for consuming events that we don't need to register our own handlers. However, when custom functionality is required, or during testing, defining our own event handler callbacks is the best way to go.
+事件流已提供了足够的功能来消费事件，一般我们不需要自己注册自己的处理器。然而，当需要定制功能或测试的时候，最好的方法是定义我们自己的事件处理器回调。
+
+到这里，我们已经有了同时运行的事件处理器，一个注册表进行和可能很多个的“桶”进程。是时候开始担心如果进程挂了会发生什么了。
