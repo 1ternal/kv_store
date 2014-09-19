@@ -1,7 +1,7 @@
-通过本教程，我们将会学习如何使用监控树、配置、测试等构建一个完整的elixir程序
+通过本教程，我们将会学习如何使用监控树、配置、测试等构建一个完整的elixir程序。
 
 
-它是一个分布式键值存储程序。我们将把键值对放入一个“桶”中，然后将“桶”发布到其他的节点。我们还会写一个简单的客户端，然后用这个客户端连接到任意一个节点上，发送如下的请求：
+这个程序将会是一个分布式键值存储程序。我们将把键值对放入一个“桶”中，然后将“桶”发布到其他的节点。我们还会写一个简单的客户端，然后用这个客户端连接到任意一个节点上，发送如下的请求：
 
 ```
 CREATE shopping
@@ -39,7 +39,7 @@ OK
 
 当你安装好Elixir后，除了`elixir`,`elixirc`和`iex`，同时还有一个叫`mix`的elixir可执行脚本。
 
-从命令行调用`mix new`命令来创建我们的第一个程序。我们将传递项目名称作为参数(本例中也就是`kv`)，然后告诉mix我们的主模块应该叫`KV`,而不是默认的`Kv`。
+在命令行调用`mix new`来创建我们的第一个程序。我们将使用项目名称作为参数(本例中也就是`kv`)，然后告诉mix我们的主模块应该叫`KV`,而不是默认的`Kv`。
 
     $ mix new kv --module KV
 
@@ -56,21 +56,21 @@ Mix将会创建一个`kv`的文件夹，并在此文件夹下创建一些文件�
     * creating test/test_helper.exs
     * creating test/kv_test.exs
 
-让我们来简要的看一看这些生成的文件。
+让我们大概的看一看这些生成的文件。
 
-> 注意：Mix是一个Elixir可执行脚本。也就是说为了运行`mix`,elixir得在你的环境变量PATH中。如果不在，你就得使用下面命令：
+> 注意：Mix是一个Elixir可执行脚本。也就是说为了运行`mix`,elixir必须在环境变量PATH中。如果不在，你就得使用下面命令：
 >
 >     $ bin/elixir bin/mix new kv --module KV
 >
-> 你也可以通过`-s`选项来运行任何可执行脚本脚本。
+> 也可以通过`-S`选项来运行任何可执行脚本。
 >
 >     $ bin/elixir -S mix new kv --module KV
 >
-> 当使用　`-S`选项，elixir将查找PATH下的脚本并执行。
+> 当使用　`-S`选项，elixir将在PATH下查找脚本并执行。
 
 ## 1.2 项目编译
 
-在新创建的目录下有一个名为`mix.exs`的文件，它的主要职责是配置项目。让我们来看看它的内容：(注释已取消)
+在新创建的目录下有一个名为`mix.exs`的文件，包含了一些项目配置信息。让我们来看看内容：(注释已取消)
 
 ```elixir
 defmodule KV.Mixfile do
@@ -92,18 +92,18 @@ defmodule KV.Mixfile do
 end
 ```
 
-我们的`mix.exs`定义了两个公有函数。`project`返回项目的一些像项目名称、版本号之类的信息，`application`用来生成一个程序文件。
+`mix.exs`定义了两个公有函数。`project`返回一些像项目名称、版本号之类的项目信息，`application`用来生成一个程序文件。
 
-还有一个被`project`函数调用，用来定义我们项目依赖的私有函数`deps`。将`deps`定义为一个独立的函数并不是必须的，主要是为了保持项目配置的简洁。
+还有一个被`project`函数调用的用来定义我们项目依赖的私有函数`deps`。将`deps`定义为一个独立的函数并不是必须的，主要是为了保持项目配置的简洁。
 
-mix也在`lib\kv.ex`文件中生成了一个简单的模块定义：
+mix也在`lib\kv.ex`文件中定义了一个简单的模块：
 
 ```elixir
 defmodule KV do
 end
 ```
 
-这个解构用来编译我们的项目已足够。
+这个结构用来编译我们的项目已足够。
 
     $ mix compile
 
@@ -112,7 +112,7 @@ end
     Compiled lib/kv.ex
     Generated kv.app
 
-注意`lib\kv.ex`文件是被编译的，`kv.app`是生成的。这个`.app`文件是根据`mix.exs`文件中的`application/0`函数提供的信息生成。稍后的几章我们将对`mix.exs`的配置进行更深入的了解。
+注意`lib\kv.ex`文件是被编译的，`kv.app`是生成的。这个`.app`文件是由`mix.exs`文件中的`application/0`函数提供的信息生成。稍后的几章我们将对`mix.exs`的配置进行更深入的了解。
 
 一旦项目编译过完成，你可以在项目中开启一个`iex`会话。
 
@@ -120,7 +120,7 @@ end
 
 ## 1.3 执行测试
 
-mix已经为我们项目测试生成了一个相应的结构。依照惯例，`lib`目录下的每个文件，在`test`目录下建立一个对应的`<filename>_test.exs`测试文件。根据这个，`lib\kv.ex`所对应的测试文件`test/kv_test.exs`也已经有了。目前我们不需要的做什么：
+mix已经为项目测试生成了一个相应的结构。依照惯例，`lib`目录下的每个文件，在`test`目录下建立一个对应的`<filename>_test.exs`测试文件。`lib\kv.ex`所对应的测试文件`test/kv_test.exs`也已经有了，目前我们不需要的做什么：
 
 ```elixir
 defmodule KVTest do
@@ -134,9 +134,9 @@ end
 
 注意以下两点
 
-1. 测试文件是一个elixir脚本文件(`.exs`).这么做我们跑测试的时候就不需要编译测试文件。
+1. 测试文件是一个elixir脚本文件(`.exs`).这样我们跑测试的时候就不需要编译测试文件。
 
-2. 我们定义了一个叫`KVTest`的测试模块，使用[`ExUnit.Case`](/docs/stable/ex_unit/ExUnit.Case.html)来注入测试API，并使用`test/2`宏定义了一个简单的测试。
+2. 我们先定义了一个叫`KVTest`的测试模块，之后使用[`ExUnit.Case`](http://elixir-lang.org/docs/stable/ex_unit/ExUnit.Case.html)注入测试API，最后用宏`test/2`定义了一个简单的测试。
 
 mix也生成了一个用来设置测试框架的文件`test/test_helper.exs`：
 
@@ -144,7 +144,7 @@ mix也生成了一个用来设置测试框架的文件`test/test_helper.exs`：
 ExUnit.start
 ```
 
-在每次运行测试之前，这个文件将自动被require。使用`mix test`执行测试：
+每次运行测试之前，这个文件将自动被require。使用`mix test`执行测试：
 
     Compiled lib/kv.ex
     Generated kv.app
@@ -155,9 +155,9 @@ ExUnit.start
 
     Randomized with seed 540224
 
-运行`mix test`，mix重新编译了源码并生成程序文件。这么做是因为mix支持我们将在下一节讲到的多环境。
+运行`mix test`后，mix重新编译了源码并生成程序文件。这么做是因为mix支持我们将在下一节讲到的多环境变量。
 
-此外，你可以说看到ExUnit会对每个随机成功的测试打印一个点。让我们测试失败将会发生什么。
+此外，你可以看到ExUnit会对每个随机测试成功打印一个点。让我们测试失败将会发生什么。
 
 将`test/kv_test.exs`文件中的断言更改如下：
 
@@ -179,9 +179,9 @@ assert 1 + 1 == 3
     Finished in 0.05 seconds (0.05s on load, 0.00s on tests)
     1 tests, 1 failures
 
-对于每个测试失败，ExUnit打印一个详细的报告，包含了测试名称的测试用例，以及`==`符号的左手值(lhs)和右手值(rhs)。
+对于每个测试失败，ExUnit打印一个详细的说明，包含了测试名称的测试用例，以及`==`符号的左手值(lhs)和右手值(rhs)。
 
-失败的第二行，也就是测试名称的下面，会显示测试定义的位置。如果你拷贝测试定义的位置，包含文件和行数，然后粘贴到`mix test`后，mix将只载入和运行这个特殊的用例。
+失败的第二行，也就是测试名称的下面，会显示测试定义的位置。如果你拷贝测试定义的位置、文件和行数，然后粘贴到`mix test`后，mix将只载入和运行这个特殊的用例。
 
     $ mix test test/kv_test.exs:4
 
@@ -191,15 +191,15 @@ assert 1 + 1 == 3
 
 ## 1.4 环境
 
-mix 支持多环境理念。这样开发者可以根据不同的场景进行自定义编译。mix默认支持以下三个环境：
+mix支持多环境理念。这样开发者可以根据不同的场景进行自定义编译。mix默认支持以下三个环境：
 
-* `:dev` - mix工作(像`compile`)的默认环境
-* `:test` - `mix test`使用的环境
+* `:dev`  - mix(像`compile`)默认工作环境
+* `:test` - `mix test`使用的测试环境
 * `:prod` - 生产环境
 
-> 记住：如果对你的项目增加依赖，这些依赖将不会从项目环境中继承，你要以`:prod`环境配置运行！
+> 记住：如果对项目增加了依赖，这些依赖将不会从项目环境中继承，你要以`:prod`环境配置运行！
 
-默认来说，这些环境的行为一致，而且我们目前看到的所有配置将对三个环境都生效。可以在`mix.exs`文件中修改每个环境配置，并且可以使用[`Mix.env`函数]返回一个当前环境的原子。
+默认来说，这些环境的行为一致，而且我们目前看到的所有配置将对三个环境都有效。在`mix.exs`文件中可以根据[这个`Mix.env`函数](http://elixir-lang.org/docs/stable/mix/Mix.html#env/1)返回的当前环境的原子值来修改每个环境配置。
 
 ```elixir
 def project do
@@ -210,18 +210,18 @@ defp deps_path(:prod), do: "prod_deps"
 defp deps_path(_), do: "deps"
 ```
 
-除了`test`任务使用`:test`外,mix默认会使用`:dev`环境。通过修改`MIX_ENV`环境变量可以更改当前环境。
+除了使用`:test`的`test`任务,mix默认会使用`:dev`环境。通过修改`MIX_ENV`环境变量可以更改当前环境。
 
     $ MIX_ENV=prod mix compile
 
 ## 1.5 探索
 
-关于mix还有很多内容，在我们构建项目时会继续探索。[这儿](http://elixir-lang.org/docs/stable/mix)还有对mix的更多内容。
+关于mix还有很多内容，在我们构建项目时会继续探索。[这儿](http://elixir-lang.org/docs/stable/mix)还有关于mix的更多内容。
 
-你可以调用下面这个命令查看所有可用的帮助任务
+你可以调用下面这个命令查看所有可用的帮助任务。
 
     $ mix help
 
-你也可以使用`mix help TASK`来获取特定命令的更多信息。
+你也可以使用`mix help TASK`来获得特定命令的信息。
 
 让我们写更多的代码！
