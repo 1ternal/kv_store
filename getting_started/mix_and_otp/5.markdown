@@ -158,28 +158,28 @@ iex> KV.Registry.lookup(KV.Registry, "shopping")
 
 太棒了!
 
-### 5.2.3 Projects or applications?
+### 5.2.3 项目还是程序?
 
-Mix makes a distinction between projects and applications. Based on the current contents of our `mix.exs` file, we would say we have a Mix project that defines the `:kv` application. As we will see in later chapters, there are projects that don't define any application.
+Mix使得项目与程序之间有了区别。基于`mix.exs`文件当前的内容，可以说我们有一个定义了`:kv`程序的Mix项目。稍后的章节将看到，也会有不包含任何程序的项目。
 
-When we say "project," you should think about Mix. Mix is the tool that manages your project. It knows how to compile your project, test your project and more. It also knows how to compile and start the application relevant to your project.
+当我们说“项目”的时候，你应该知道我们谈论的是Mix项目。Mix是一个项目管理工具，知道如何对你的项目进行编译和测试，也知道如何编译并启动与你的项目有关的应用程序。
 
-When we talk about applications, we talk about OTP. Applications are the entities that are started and stopped as a whole by the runtime. You can learn more about applications in the [docs for the Application module](/docs/stable/elixir/Application.html), as well as by running `mix help compile.app` to learn more about the supported options in `def application`.
+当我们说程序的时候，我们谈论的是OTP。在运行时，程序是作为一个整体启动和停止的实体。你可以在[程序模块文档](http://elixir-lang.org/docs/stable/elixir/Application.html)了解更多信息，也可以执行`mix help compile.app` 来了解更多关于`def application`支持的选项。
 
-## 5.3 Simple one for one supervisors
+## 5.3 简单一对一监控
 
-We have now successfully defined our supervisor which is automatically started (and stopped) as part of our application lifecycle.
+我们已经成功定义了作为程序生命周期的一部分的能自动启动（和停止）的监控器。
 
-Remember however that our `KV.Registry` is both linking and monitoring bucket processes in the `handle_cast/2` callback:
+然而还记得的是在`handle_cast/2`回调中`KV.Registry`是同时链接和监控“桶”进程的。
 
 ```elixir
 {:ok, pid} = KV.Bucket.start_link()
 ref = Process.monitor(pid)
 ```
 
-Links are bi-directional, which implies that a crash in a bucket will crash the registry. Although we now have the supervisor, which guarantees the registry will be back up and running, crashing the registry still means we lose all data associating bucket names to their respective processes.
+链接是双向绑定，也就是说“桶”进程崩溃了注册表进程也就崩溃。尽管我们使用了监控器，会保证注册表进程会重新运行，但是注册表进程的崩溃就意味着我们将会丢失与之链接的“桶”进程的数据。
 
-In other words, we want the registry to keep on running even if a bucket crashes. Let's write a test:
+换句话说，就算“桶”进程崩溃了，我们还是想让注册表进程一直处于运行的状态。让我们写一个测试：
 
 ```elixir
 test "removes bucket on crash", %{registry: registry} do
@@ -193,7 +193,7 @@ test "removes bucket on crash", %{registry: registry} do
 end
 ```
 
-The test is similar to "removes bucket on exit" except that we are being a bit more harsh. Instead of using `Agent.stop/1`, we are sending an exit signal to shutdown the bucket. Since the bucket is linked to the registry, which is then linked to the test process, killing the bucket causes the registry to crash which then causes the test process to crash too:
+除了有点糙之外，这个测试跟“退出时移除桶进程”很类似。不同之处在于，我们给“桶”进程发送了退出信号，而不是使用`Agent.stop/1`。因为“桶”进程是链接到注册表的，而注册表又链接了测试进程，杀掉“桶”进程会造成注册表进程崩溃，转而造成测试进程也崩溃：
 
 ```
 1) test removes bucket on crash (KV.RegistryTest)
@@ -201,11 +201,11 @@ The test is similar to "removes bucket on exit" except that we are being a bit m
    ** (EXIT from #PID<0.94.0>) shutdown
 ```
 
-One possible solution to this issue would be to provide a `KV.Bucket.start/0`, that invokes `Agent.start/1`, and use it from the registry, removing the link between registry and buckets. However, this would be a bad idea, because buckets would not be linked to any process after this change. This means that if someone stops the `kv` application, all buckets would remain alive as they are unreachable.
+一个可能移除注册表与桶进程链接的方法是提供一个调用`Agent.start/1`的`KV.Bucket.start/0`函数，然后注册表使用它。然而，这也不是个好想法，因为这样更改以后，“桶”不会链接道任何一个进程上，会造成如果有人停止了`kv`程序，所有的“桶”进程都将运行着，但都无法访问。
 
-We are going to solve this issue by defining a new supervisor that will spawn and supervise all buckets. There is one supervisor strategy, called `:simple_one_for_one`, that is the perfect fit for such situations: it allows us to specify a worker template and supervise many children based on this template.
+我们将新定义一个的监控器用来生成、监控这些“桶”。有个叫`:simple_one_for_one`监控策略完美匹配现在的情况：它允许指定一个worker模板,监控多个基于此模板生成的子进程。
 
-Let's define our `KV.Bucket.Supervisor` as follows:
+以下面的内容定义我们的`kV.Bucket.Supervior`:
 
 ```elixir
 defmodule KV.Bucket.Supervisor do
@@ -229,13 +229,13 @@ defmodule KV.Bucket.Supervisor do
 end
 ```
 
-There are two changes in this supervisor compared to the first one.
+跟第一个监控器相比有两个地方不同。
 
-First, we define a `start_bucket/1` function that will receive a supervisor and start a bucket process as a child of that supervisor. `start_bucket/1` is the function we are going to invoke instead of calling `KV.Bucket.start_link` directly in the registry.
+首先，我们定义了一个`start_bucket/1`函数，它接受一个监控器和开启一个作为子进程的“桶”进程。`start_bucket/1`是代替直接调用`KV.Bucket.start_link`、直接在注册表中调用的函数。
 
-Second, in the `init/1` callback, we are marking the worker as `:temporary`. This means that if the bucket dies, it won't be restarted! That's because we only want to use the supervisor as a mechanism to group the buckets. The creation of buckets should always pass through the registry.
+其次，在`init/1`回调中，我们将子进程标记为`:temporary`。也就是说如果“桶”进程挂了不会重启！这是因为我们只是用监控器行为来作为分组“桶”进程的机制。“桶”进程的创建还是要传递到注册表。
 
-Run `iex -S mix` so we can give our new supervisor a try:
+运行`iex -S mix`，我们可以尝试下新的监控器：
 
 ```iex
 iex> {:ok, sup} = KV.Bucket.Supervisor.start_link
@@ -248,7 +248,7 @@ iex> KV.Bucket.get(bucket, "eggs")
 3
 ```
 
-Let's change the registry to work with the buckets supervisor. We are going to follow the same strategy we did with the events manager, where we will explicitly pass the buckets supervisor pid to `KV.Registry.start_link/3`. Let's start by changing the setup callback in `test/kv/registry_test.exs` to do so:
+让我们修改注册表来和“桶”监控者一起工作。与事件管理器相同，我们将直接的传递“桶”监控的进程号给`KV.Registry.start_link/3`。让我们修改`test/kv/registry_test.exs`测试文件的setup回调：
 
 ```elixir
 setup do
@@ -261,7 +261,7 @@ setup do
 end
 ```
 
-Now let's change the appropriate functions in `KV.Registry` to take the new supervisor into account:
+现在修改相应的`KV.Registry`函数来让新监控器工作：
 
 ```elixir
 ## Client API
@@ -298,13 +298,13 @@ def handle_cast({:create, name}, state) do
 end
 ```
 
-Those changes should be enough to make our tests pass! To complete our task, we just need to update our supervisor to also take the buckets supervisor as child.
+修改过后我们的测试应该就能通过了！为完成我们的任务,我们只需要更新我们的监控器并将“桶”作为子进程进行监控。
 
-## 5.4 Supervision trees
+## 5.4 监控树
 
-In order to use the buckets supervisor in our application, we need to add it as a child of `KV.Supervisor`. Notice we are beginning to have supervisors that supervise other supervisors, forming so-called "supervision trees."
+为了在程序中使用“桶”监控器，我们需要将它以子进程加入`KV.Supervisor`监控器。注意到，我们将开始在监控器中监控其他的监控器，正式的叫法是"监控树"。
 
-Open up `lib/kv/supervisor.ex`, add an additional module attribute for the buckets supervisor name, and change `init/1` to match the following:
+打开`lib/kv/supervisor.ex`文件，给桶监控器增加一个模块属性，以下列内容修改`init/1`函数：
 
 ```elixir
 @manager_name KV.EventManager
@@ -322,15 +322,15 @@ def init(:ok) do
 end
 ```
 
-This time we have added a supervisor as child and given it the name of `KV.Bucket.Supervisor` (again, the same name as the module). We have also updated the `KV.Registry` worker to receive the bucket supervisor name as argument.
+这次我们以`KV.Bucket.Supervisor`命名（同样的，与模块同名）把它作为子进程加入到监控器中。也更新了`KV.Registry`worker，以接收"桶"进程名称为参数。
 
-Also remember that the order in which children are declared is important. Since the registry depends on the buckets supervisor, the buckets supervisor must be listed before it in the children list.
+同时要记住的是，子进程宣告的顺序非常重要。注册表进程依赖于“桶”监控器，所以在子进程列表内，“桶”进程必须列在注册表进程之前。
 
-Since we have added more children to the supervisor, it is important to evaluate if the `:one_for_one` strategy is still correct. One flaw that shows up right away is the relationship between registry and buckets supervisor. If the registry dies, the buckets supervisor must die too, because once the registry dies all information linking the bucket name to the bucket process is lost. If the buckets supervisor is kept alive, it would be impossible to reach those buckets.
+因为我们给监控器增加了更多子进程，重新验证`:one_for_one`策略的正确性非常重要。目前看到的一个瑕疵点是注册表和“桶”监控器之间的关系。如果注册表挂了，“桶”监控器也必须挂，因为一旦注册表挂了，所有关于与“桶”名关联的信息都会丢失。就算“桶”监控器还没挂，这些“桶”也不可能连接的上。
 
-We could consider moving to another strategy like `:one_for_all`. The `:one_for_all` strategy kills and restarts all children whenever one of the children die. This change is not ideal either, because a crash in the registry should not crash the event manager. In fact, doing so would be harmful, as crashing the event manager would cause all installed event handlers to be removed.
+我们可以考虑使用另外一种策略`:one_for_all`。任意一个子进程挂了，`:one_for_all`策略会重启所有的子进程。这也不合适，因为注册表挂了不应该影响事件管理器。实际上，这么做很有可能造成危害，因为事件管理器挂了将会造成所有事件处理器被移除。
 
-One possible solution to this problem is to create another supervisor that will supervise the registry and buckets supervisor with `:one_for_all` strategy, and have the root supervisor supervise both the event manager and the new supervisor with `:one_for_one` strategy. The proposed tree would have the following format:
+另一个可能的解决这个问题的方法是新建一个使用`:one_for_all`策略的监控器来监控注册表和“桶”监控器，然后让根监控器以`:one_for_one`策略监控事件管理器和这个新监控器。这个树形将会是下面这样的格式：
 
 ```
 * root supervisor [one_for_one]
@@ -341,6 +341,6 @@ One possible solution to this problem is to create another supervisor that will 
     * registry
 ```
 
-You can take a shot at building this new supervision tree, but we will stop here. This is because in the next chapter we will make changes to the registry that will allow the registry data to be persisted, making the `:one_for_one` strategy a perfect fit.
+你可以尝试使用这个新监控树，但是我们就到这儿了。因为下一章我们将修改注册表让它可以持久化注册表的数据，对于使用`:one_for_one`策略，这是一个完美的搭配。
 
-Remember, there are other strategies and other options that could be given to `worker/2`, `supervisor/2` and `supervise/2` functions, so don't forget to check out [the Supervisor module documentation](/docs/stable/elixir/Supervisor.html).
+记住，对于`worker/2`, `supervisor/2` 和 `supervise/2`函数，还有其他的策略和选项可供使用，所以不要了查看[监控器模块文档](http://elixir-lang.org/docs/stable/elixir/Supervisor.html)

@@ -5,9 +5,9 @@ defmodule KV.Registry do
   @doc """
   启动注册表进程
   """
-  def start_link(event_manager, opts \\ []) do
-    #1.start_link现在期望收到一个事件管理器作为参数
-    GenServer.start_link(__MODULE__, event_manager, opts)
+  def start_link(event_manager, buckets, opts \\ []) do
+    #1.已参数传递桶监控者
+    GenServer.start_link(__MODULE__, {event_manager, buckets}, opts)
   end
 
   @doc """
@@ -33,12 +33,11 @@ defmodule KV.Registry do
   end
 
   ##服务器端回调
-  def init(events) do
-    #2.初始化回调将接受到这个事件管理器。
-    #我们也把管理器状态从元组更改为map,这样将来增加新的字段时就不需要重写所有的回调。
+  def init({events,buckets}) do
     names = HashDict.new
     refs  = HashDict.new
-    {:ok, %{names: names, refs: refs, events: events}}
+    #2. 状态中存入桶监控器
+    {:ok, %{names: names, refs: refs, events: events, buckets: buckets}}
   end
 
   def handle_call({:lookup, name}, _from, state) do
@@ -53,11 +52,11 @@ defmodule KV.Registry do
     if HashDict.get(state.names, name) do
       {:noreply, state}
     else
-      {:ok, pid} = KV.Bucket.start_link()
+      #3.用桶进程代替直接启动“桶”
+      {:ok, pid} = KV.Bucket.Supervisor.start_bucket(state.buckets)
       ref = Process.monitor(pid)
       refs = HashDict.put(state.refs, ref, name)
       names = HashDict.put(state.names, name, pid)
-      #3. 创建时给事件管理者推送通知
       GenEvent.sync_notify(state.events, {:create, name, pid})
       {:noreply, %{state| names: names, refs: refs}}
     end
@@ -66,7 +65,6 @@ defmodule KV.Registry do
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     {name, refs} = HashDict.pop(state.refs, ref)
     names = HashDict.delete(state.names, name)
-    #4. 退出时给事件管理者推送通知
     GenEvent.sync_notify(state.events, {:exit, name, pid})
     {:noreply, %{state| names: names, refs: refs}}
   end
