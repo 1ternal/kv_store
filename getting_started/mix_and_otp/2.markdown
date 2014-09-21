@@ -1,22 +1,22 @@
-这一章，我们将创建一个叫`KV.Bucket`的模块。它的主要职责是允许以不同进程读写的方式存储键值对。
+这一章，我们将创建一个叫`KV.Bucket`的模块。它的功能是允许不同进程读写键值对。
 
 如果你跳过了基础教程或很久之前看过，请重新再把[进程](http://elixir-lang.org/getting_started/11.html)读一遍，它是这一章的基础。
 
 ## 2.1 状态的问题
 
-Elixir是不可变类型语言，也就是说不共享任何东西。如果我们想创建一个从多个地方可以存储和访问的"桶"，我们有以下两个选择：
+Elixir是不可变类型语言，默认不共享任何东西。如果我们想创建一个从多个地方可以存储和访问的"桶"，我们有以下两个选择：
 
 * 进程(process)
 * [ETS (Erlang Term Storage)](http://www.erlang.org/doc/man/ets.html)
 
-我们已经谈到过进程,ETS这个新东西稍后在本教程将会讲到。谈到进程，我们很少自己手写进程，而是使用Elixir和OTP提供的编程模式抽象：
+我们已经讲过进程,ETS这个新东西稍后在本教程讲到。谈到进程，我们很少自己手写进程，而是使用Elixir和OTP提供的抽象编程行为：
 
 * [Agent](http://elixir-lang.org/docs/stable/elixir/Agent.html) - 简单的状态包装器
 * [GenServer](http://elixir-lang.org/docs/stable/elixir/GenServer.html) - 封装状态、提供同步和异步调用、支持代码重新加载等功能的“通用服务器(进程)”
 * [GenEvent](http://elixir-lang.org/docs/stable/elixir/GenEvent.html) - 允许向多个事件处理器发布事件的"通用事件"管理器。
-* [Task](http://elixir-lang.org/docs/stable/elixir/Task.html) - 允许生成进程，稍后很容易的接收结果的异步计算单元。
+* [Task](http://elixir-lang.org/docs/stable/elixir/Task.html) - 允许生成进程，稍后很容易接收结果的异步计算单元。
 
-本教程将讲到所有的这些抽象模式。记住它们全部是在进程之上，由虚拟机提供的几个简单的功能像`send`, `receive`, `spawn`和`link`实现的。
+本教程将讲到所有的这些抽象行为。它们全部是构建于进程之上，由虚拟机提供的几个简单的功能像`send`, `receive`, `spawn`和`link`实现的。
 
 ## 2.2 Agents
 
@@ -39,7 +39,7 @@ iex> Agent.stop(agent)
 
 我们以一个空列表为起始状态开启了一个agent。接下来，我们发送一个更新状态的命令，将新的东西添加到列表头部。最后，我们取回整个列表。一旦我们完成了操作，我们可以使用`Agent.stop/1`来终止这个agent进程。
 
-让我们用agent实现`KV.Bucket`。开始前，让我们先写一些测试。让我们以以下内容新建一个文件`test/kv/bucket_test.exs`(记住是`.exs`后缀)：
+让我们用agent实现`KV.Bucket`。开始前，让我们先写一些测试。让我们以下面的内容新建一个文件`test/kv/bucket_test.exs`(记住是`.exs`后缀)：
 
 ```elixir
 defmodule KV.BucketTest do
@@ -55,13 +55,13 @@ defmodule KV.BucketTest do
 end
 ```
 
-我们的第一个测试很直接。我们开启一个`KV.Bucket`然后执行一些`get/2`和`put/3`操作并断言结果。我们不需要明确停止agent，因为agent进程是链接到测试进程的，当测试结束的时候agent会自动关闭。
+第一个测试很简单。我们启动一个`KV.Bucket`，然后执行一些`get/2`和`put/3`操作并断言结果。我们不需要明确停止agent，因为agent进程是链接到测试进程的，当测试结束的时候agent会自动关闭。
 
 同样注意到我们给`ExUnit.Case`传递了一个`async: true`选项。这个选项可以让同样使用`:async`选项的测试并行执行。这对多核的机器上提升测试速度非常有用。还需要注意的是，只在没有其他依赖或不更改任何全局值的时候设置`:async`选项。例如为了避免竞争危害，当测试需要写文件、注册进程、访问数据库时，不能设置为同步。
 
-不管是否同步，因为我们没有实现任何功能，新的测试很明显会失败。
+不管是否同步，新的测试很明显会失败，因为我们还没有实现任何功能。
 
-为了通过测试，让我们以以下内容新建`lib/kv/bucket.ex`文件。在看下面的代码之前，你自己可以随意实现`KV.Bucket`模块。
+为了通过测试，让我们以下面内容新建`lib/kv/bucket.ex`文件。在看下面的代码之前，你自己可以尝试实现`KV.Bucket`模块。
 
 ```elixir
 defmodule KV.Bucket do
@@ -92,7 +92,7 @@ end
 
 ## 2.3 ExUnit回调
 
-给`KV.Bucket`增加更多功能前，让我们来讨论下ExUnit回调。正如你所想，所有的`KV.Bucket`测试开始前都需要"桶"先开启，结束时关闭。幸运的是，ExUnit支持能让我们省略这样重复事情的回调。
+给`KV.Bucket`增加更多功能前，让我们来讨论下ExUnit回调。如你所想，所有的`KV.Bucket`测试开始前都需要先开启"桶"，结束时关闭。幸运的是，ExUnit的回调能让我们省略这样重复的事情。
 
 让我们用回调重写测试：
 
@@ -114,9 +114,9 @@ defmodule KV.BucketTest do
 end
 ```
 
-我们使用`setup/1`宏定义了一个回调。`setup/1`回调会在每个测试前在测试同样的进程里运行。
+我们使用`setup/1`宏定义了一个回调。`setup/1`回调会在每个测试前运行在与测试同一个进程中。
 
-我们需要从回调里把`bucket`的pid传递给测试这样一个机制，为此使用了*测试上下文(test context)*来达到这个目的。当我们从回调里返回`{:ok, bucket: bucket}`时，ExUnit回调将会把元组的第二个元素返回给测试上下文。在测试定义中匹配后，测试中就可以获取到对应的测试上下文中的map值。
+我们需要从回调里把`bucket`的pid传递给测试，为此使用了*测试上下文(test context)*来达到这个目的。当我们从回调里返回`{:ok, bucket: bucket}`时，ExUnit回调将会把元组的第二个元素返回给测试上下文。在测试定义中匹配后，测试中就可以获取到对应的测试上下文中的map值。
 
 ```elixir
 test "stores values by key", %{bucket: bucket} do
@@ -155,9 +155,9 @@ def delete(bucket, key) do
 end
 ```
 
-传递给agent的函数里的东西，都会在agent里执行。以此来看，agent是一个接收、响应我们的消息的进程，我们叫这个agent为Server。此函数外所有动作发生客户端。
+传递给agent的函数里的东西，都会在agent里执行。因此，agent是一个接收、响应我们的消息的进程，我们叫这个agent为服务器。此函数外所有动作发生客户端。
 
-这是个很重要的区别。如果有耗时的操作,您必须考虑在客户端或服务器端上哪个更好。例如
+这是个很重要的区别。如果有耗时的操作,您必须考虑放在客户端或服务器端哪个更好。例如
 
 ```elixir
 def delete(bucket, key) do
@@ -171,4 +171,4 @@ end
 
 当服务器端在执行一个耗时的操作，所有到这个服务器端的其他请求只能等待这个操作完成，这很有可能造成客户端的超时。
 
-下一章我们将会了解"通用服务器"，客户端和服务器端的分割会更明显哟
+下一章我们将会了解"通用服务器"，客户端和服务器端的分割会更明显哟。
