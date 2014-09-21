@@ -1,10 +1,10 @@
-这一章，我们将会学习另外一个由Elixir和OTP提供的行为逻辑抽象GenEvent,它允许我们生成一个能够发布多个事件到多个事件处理器的事件管理器。
+这一章，我们将会学习另外一个由Elixir和OTP提供的抽象行为通用事件（GenEvent）,它允许我们生成一个能够发布多个事件到多个事件处理器的事件管理器。
 
 有两个事件需要我们发布：一个是每次“桶”增加到注册表，另一个是从注册表中移除。
 
-## 4.1 事件管理器(GenEvent)
+## 4.1 通用事件(GenEvent)
 
-让我们使用`iex -S mix`开启一个会话然后稍微了解下事件管理器的API:
+让我们使用`iex -S mix`开启一个会话然后稍微了解下通用事件的API:
 
 ```elixir
 iex> {:ok, manager} = GenEvent.start_link
@@ -17,7 +17,7 @@ iex> GenEvent.notify(manager, :world)
 
 用`GenEvent.start_link/0`函数启动一个新的事件管理器。这就是启动一个管理器所有的要求。管理器创建之后，我们可以使用`GenEvent.notify/2`和`GenEvent.sync_notify/2`来发送通知。
 
-然而，因为事件管理器没有与任何事件处理器绑定，所以每个通知也不会发生任何事情。
+然而，因为事件管理器没有与任何事件处理器绑定，所以每个通知不会发生任何事情。
 
 让我们在IEx中创建第一个事件处理器，发送所有的事件到指定进程：
 
@@ -52,7 +52,7 @@ iex> flush
 2. `sync_notify/2`根据请求同步执行事件管理器
 3. `notify/2`异步执行事件处理器
 
-因此，`sync_notify/2`和`notify/2`与通用服务器的`call/2`和`cast/2`类似，一般建议使用`sync_notify/2`同步调用。同步调用以背压机制工作，当事件管理器无法更快的分发事件时，它会给调用者发送信息减少消息被发送的可能性。
+因此，`sync_notify/2`和`notify/2`与通用服务器的`call/2`和`cast/2`类似，一般建议使用`sync_notify/2`同步调用。同步调用使用背压机制，当事件管理器无法更快的分发事件时，它会给调用者发送信息减少消息被发送的可能性。
 
 一定要去[模块文档](http://elixir-lang.org/docs/stable/elixir/GenEvent.html)看看通用事件管理器提供的其他功能。目前我们已经有了足够的知识来为我们的程序添加事件处理器。
 
@@ -96,7 +96,6 @@ end
 
 最后,我们调用`GenEvent.add_mon_handler/3`,而不是`GenEvent.add_handler/3`。这个函数不仅增加处理器（这我们知道）还会告诉事件管理器来监控当前的进程。如果当前进程挂了，事件处理器也就自动被移除。这么做的原因是，在`Forwarder`这个例子，如果这些信息的接收者(self()/测试进程)不存在了，我们应该停止转发信息。
 
-Let's now change the registry to make the tests pass. Open up `lib/kv/registry.ex` and paste the new registry implementation below (comments inlined):
 让我们修改注册表代码来让测试通过。打开`lib/kv/registry.ex`文件，粘贴下面的实现代码（单行注释）：
 
 ```elixir
@@ -193,9 +192,8 @@ iex> GenEvent.notify(manager, {:hello, :world})
 :ok
 ```
 
-上面这个例子，我们新建了一个`GenEvent.stream(manager)`来返回一个事件到达时可以消费的枚举类(enumerable)的事件流(stream)。因为消费这样的事件是一个阻塞操作，我们生成了一个新的进程来消费它并将它打印输出到终端上，这就是我们想看到的行为。每次调用`sync_notify/2`或`notify/2`时，事件将会在原子`:ok`后打印在终端上。（也就是IEx将返回的通知函数结果打印在终端上）。
+上面这个例子，我们新建了一个`GenEvent.stream(manager)`来返回一个事件到达时可以消费的枚举类(enumerable)事件流(stream)。因为消费这样的事件是一个阻塞操作，我们生成了一个新的进程来消费它并将它打印输出到终端上，这就是我们想看到的行为。每次调用`sync_notify/2`或`notify/2`时，事件将会在原子`:ok`后打印在终端上。（也就是IEx将返回的通知函数结果打印在终端上）。
 
-Often event streams provide enough functionality for consuming events that we don't need to register our own handlers. However, when custom functionality is required, or during testing, defining our own event handler callbacks is the best way to go.
 事件流已提供了足够的功能来消费事件，一般我们不需要自己注册自己的处理器。然而，当需要定制功能或测试的时候，最好的方法是定义我们自己的事件处理器回调。
 
 到这里，我们已经有了同时运行的事件处理器，一个注册表进行和可能很多个的“桶”进程。是时候开始担心如果进程挂了会发生什么了。
