@@ -11,47 +11,67 @@ defmodule KV.RegistryTest do
   end
 
   setup do
-    {:ok, sup} = KV.Bucket.Supervisor.start_link
-    {:ok, manager} = GenEvent.start_link()
-    {:ok, registry} = KV.Registry.start_link(manager,sup)
-
-    GenEvent.add_mon_handler(manager, Forwarder, self())
-    {:ok, registry: registry}
+    ets = :ets.new(:registry_table, [:set, :public])
+    registry = start_registry(ets)
+    {:ok, registry: registry, ets: ets}
   end
 
-  test "spawn buckets", %{registry: registry} do
-    assert KV.Registry.lookup(registry, "shopping") == :error
+  defp start_registry(ets) do
+    {:ok, sup} = KV.Bucket.Supervisor.start_link
+    {:ok, manager} = GenEvent.start_link
+    {:ok, registry} = KV.Registry.start_link(ets, manager, sup)
+
+    GenEvent.add_mon_handler(manager, Forwarder, self())
+    registry
+  end
+
+  test "spawn buckets", %{registry: registry, ets: ets} do
+    assert KV.Registry.lookup(ets, "shopping") == :error
 
     KV.Registry.create(registry, "shopping")
-    assert {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+    assert {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
 
     KV.Bucket.put(bucket, "milk", 3)
     assert KV.Bucket.get(bucket, "milk") == 3
   end
 
-  test "removes bucket on exit", %{registry: registry} do
+  test "removes bucket on exit", %{registry: registry, ets: ets} do
     KV.Registry.create(registry, "shopping")
-    {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
     Agent.stop(bucket)
-    assert KV.Registry.lookup(registry, "shopping") == :error
+    assert_receive {:exit, "shopping", ^bucket}
+    assert KV.Registry.lookup(ets, "shopping") == :error
   end
 
-  test "sends events on create and crash", %{registry: registry} do
+  test "sends events on create and crash", %{registry: registry, ets: ets} do
     KV.Registry.create(registry, "shopping")
-    {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
     assert_receive {:create, "shopping", ^bucket}
 
     Agent.stop(bucket)
     assert_receive {:exit, "shopping", ^bucket}
   end
 
-  test "removes bucket on crash", %{registry: registry} do
+  test "removes bucket on crash", %{registry: registry, ets: ets} do
     KV.Registry.create(registry, "shopping")
-    {:ok, bucket} = KV.Registry.lookup(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
 
-    #杀死这个桶进程，等待通知
     Process.exit(bucket, :shutodwn)
     assert_receive {:exit, "shopping", ^bucket}
-    assert KV.Registry.lookup(registry, "shopping") == :error
+    assert KV.Registry.lookup(ets, "shopping") == :error
+  end
+
+  test "monitors existing entries", %{registry: registry, ets: ets} do
+    bucket = KV.Registry.create(registry, "shopping")
+
+    Process.unlink(registry)
+    Process.exit(registry, :shutdown)
+
+    start_registry(ets)
+    assert KV.Registry.lookup(ets, "shopping") == {:ok, bucket}
+
+    Process.exit(bucket, :shutdown)
+    assert_receive {:exit, "shopping", ^bucket}
+    assert KV.Registry.lookup(ets, "shopping") == :error
   end
 end

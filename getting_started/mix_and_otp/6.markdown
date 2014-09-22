@@ -1,0 +1,467 @@
+每当查找“桶”时，我们都需要给注册表发送信息。在某些程序里，意味着注册表可能会成为瓶颈。
+
+这一章，我们想会学习ETS(Erlang数据存储，Erlang Term Storage)，如果将它用作缓存。稍后,我们将讲到如何使用它持久化监控者和子进程的数据，甚至崩溃的时，也能持久化。
+
+> 警告！不要过早的将ETS作为缓存！记录和分析你的程序，找到哪一个部分是瓶颈，再决定**是否**应该使用缓存和缓存**哪些**。这一章仅仅是一个当你需要缓存的时候，怎样使用ETS的示例。
+
+## 6.1 ETS作为cache
+
+ETS允许我们在内存数据表中存储任何的Erlang/Elixir数据。通过[erlang的`:ets`模块](http://www.erlang.org/doc/man/ets.html)使用ETS:
+
+```iex
+iex> table = :ets.new(:buckets_registry, [:set, :protected])
+8207
+iex> :ets.insert(table, {"foo", self})
+true
+iex> :ets.lookup(table, "foo")
+[{"foo", #PID<0.41.0>}]
+```
+
+当新建一个ETS表时，有两个必须的参数：表名和一组选项。从可用的选项中，我们传递了表的类型和访问规则。我们选择表类型为键不能重复的`:set`，表访问规则为`:protected`,也就是说所有进程可读，但只有创建表的进程可写。这俩实际是默认值，之后我们将省略它。
+
+ETS表同样可以被命名，允许我们使用给定的名称进行访问:
+
+```iex
+iex> :ets.new(:buckets_registry, [:named_table])
+:buckets_registry
+iex> :ets.insert(:buckets_registry, {"foo", self})
+true
+iex> :ets.lookup(:buckets_registry, "foo")
+[{"foo", #PID<0.41.0>}]
+```
+
+让我们使用ETS修改`KV.Registry`。使用之前事件管理器和“桶”监控器相同的方法，给`start_link`函数传递ETS的表名。记住，与服务器名一样，任何本地的进程知道ETS表名后，都可以访问这个表。
+
+打开`lib/kv/registry.ex`文件，修改代码。为了更清楚，我们对代码修改的部分增加了一些注释。
+
+```elixir
+defmodule KV.Registry do
+  use GenServer
+
+  ## Client API
+
+  @doc """
+  Starts the registry.
+  """
+  def start_link(table, event_manager, buckets, opts \\ []) do
+    # 1. We now expect the table as argument and pass it to the server
+    GenServer.start_link(__MODULE__, {table, event_manager, buckets}, opts)
+  end
+
+  @doc """
+  Looks up the bucket pid for `name` stored in `table`.
+
+  Returns `{:ok, pid}` if a bucket exists, `:error` otherwise.
+  """
+  def lookup(table, name) do
+    # 2. lookup now expects a table and looks directly into ETS.
+    #    No request is sent to the server.
+    case :ets.lookup(table, name) do
+      [{^name, bucket}] -> {:ok, bucket}
+      [] -> :error
+    end
+  end
+
+  @doc """
+  Ensures there is a bucket associated with the given `name` in `server`.
+  """
+  def create(server, name) do
+    GenServer.cast(server, {:create, name})
+  end
+
+  ## Server callbacks
+
+  def init({table, events, buckets}) do
+    # 3. We have replaced the names HashDict by the ETS table
+    ets  = :ets.new(table, [:named_table, read_concurrency: true])
+    refs = HashDict.new
+    {:ok, %{names: ets, refs: refs, events: events, buckets: buckets}}
+  end
+
+  # 4. The previous handle_call callback for lookup was removed
+
+  def handle_cast({:create, name}, state) do
+    # 5. Read and write to the ETS table instead of the HashDict
+    case lookup(state.names, name) do
+      {:ok, _pid} ->
+        {:noreply, state}
+      :error ->
+        {:ok, pid} = KV.Bucket.Supervisor.start_bucket(state.buckets)
+        ref = Process.monitor(pid)
+        refs = HashDict.put(state.refs, ref, name)
+        :ets.insert(state.names, {name, pid})
+        GenEvent.sync_notify(state.events, {:create, name, pid})
+        {:noreply, %{state | refs: refs}}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    # 6. Delete from the ETS table instead of the HashDict
+    {name, refs} = HashDict.pop(state.refs, ref)
+    :ets.delete(state.names, name)
+    GenEvent.sync_notify(state.events, {:exit, name, pid})
+    {:noreply, %{state | refs: refs}}
+  end
+
+  def handle_info(_msg, state) do
+    {:noreply, state}
+  end
+end
+```
+
+注意，我们修改前`KV.Bucket.lookup/2`向服务器发送请求，现在直接从与所有进程共享的ETS表中读取。这就是我们实现的缓存机制的主要想法。
+
+为了使缓存工作，创建的ETS表需要有`:protected`（默认)权限，也就是说只有`KV.Registry`可写，其他进程只读。ets表启动时，我们也将选项设置为`read_concurrency: true`来优化一般情况下的并发读操作。
+
+The changes we have performed above have definitely broken our tests. For starters, there is a new argument we need to pass to `KV.Registry.start_link/3`. Let's start amending our tests in `test/kv/registry_test.exs` by rewriting the `setup` callback:
+上面的修改肯定使我们的测试失败。对于初学者，有一个新的参数我们需要传递给`KV.Registry.start_link/3`函数。让我们修改`test/kv/registry_test.exs`测试文件，重写`setup`回调
+
+```elixir
+setup do
+  {:ok, sup} = KV.Bucket.Supervisor.start_link
+  {:ok, manager} = GenEvent.start_link
+  {:ok, registry} = KV.Registry.start_link(:registry_table, manager, sup)
+
+  GenEvent.add_mon_handler(manager, Forwarder, self())
+  {:ok, registry: registry, ets: :registry_table}
+end
+```
+
+我们将表名`:registry_table`传递给`KV.Registry.start_link/3`，然后将返回的`ets: :registry_table`作为测试上下文的一部分。
+
+更改过后，我们的测试仍旧失败。格式如下：
+
+```
+1) test spawns buckets (KV.RegistryTest)
+   test/kv/registry_test.exs:38
+   ** (ArgumentError) argument error
+   stacktrace:
+     (stdlib) :ets.lookup(#PID<0.99.0>, "shopping")
+     (kv) lib/kv/registry.ex:22: KV.Registry.lookup/2
+     test/kv/registry_test.exs:39
+```
+
+发生的原因是，我们将注册表的进程号传递给了`KV.Registry.lookup/2`，但它现在接收ETS表。我们可以修改出现：
+
+```elixir
+KV.Registry.lookup(registry, ...)
+```
+
+到:
+
+```elixir
+KV.Registry.lookup(ets, ...)
+```
+
+和注册表同样的方式接收`ets`：
+
+```elixir
+test "spawns buckets", %{registry: registry, ets: ets} do
+```
+
+修改我们的测试传递`ets`给`lookup/2`。就算我们完成这些修改，测试还是要失败。你可能注意到了，测试通过和失败运行之间的不一致。例如，这个`spawns buckets`测试:
+
+```elixir
+test "spawns buckets", %{registry: registry, ets: ets} do
+  assert KV.Registry.lookup(ets, "shopping") == :error
+
+  KV.Registry.create(registry, "shopping")
+  assert {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+
+  KV.Bucket.put(bucket, "milk", 1)
+  assert KV.Bucket.get(bucket, "milk") == 1
+end
+```
+
+或许在这一行失败:
+
+```elixir
+assert {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+```
+
+我们之前一行创建的"桶"怎么会失败？
+
+The reason those failures are happening is because, for didactic purposes, we have made two mistakes:
+由于示例的原因，测试失败是因为我们犯了两个错误：
+
+1. 过早的优化（增加了缓存这一层）
+2. 使用`cast/2`（我们应该使用`call/2`)
+
+## 6.2 竞态竞争?
+
+在Elixir中开发并不会使你的代码免于竞态竞争。然而，Elixir默认不共享任何状态的简单抽象  使得查找竞态竞争的根本原因变得简单。
+
+我们测试中发生的情况是操作与表现在ETS表上的延迟。这是我们期望的：
+
+1. 调用 `KV.Registry.create(registry, "shopping")`
+2. 注册表创建“桶“和更新缓存表
+3. 使用`KV.Registry.lookup(ets, "shopping")`函数从表中获取信息
+4. 上面的命令返回`{:ok, bucket}`
+
+然而，因为`KV.Registry.create/2`是一个异步操作，这个命令将会在我们写入表之前返回！话句话说，这是实际发生的:
+
+1. 调用 `KV.Registry.create(registry, "shopping")`
+2. 使用`KV.Registry.lookup(ets, "shopping")`函数从表中获取信息
+3. 上面命令返回`:error`
+4. 注册表创建“桶“和更新缓存表
+
+我们只需要使用`call/2`代替`cast/2`同步调用`KV.Registry.create/2`函数就可以修复失败。这将会保证客户端只会在更改变更到表后继续。让我们更改函数和它的回调如下：
+
+```elixir
+def create(server, name) do
+  GenServer.call(server, {:create, name})
+end
+
+def handle_call({:create, name}, _from, state) do
+  case lookup(state.names, name) do
+    {:ok, pid} ->
+      {:reply, pid, state} # Reply with pid
+    :error ->
+      {:ok, pid} = KV.Bucket.Supervisor.start_bucket(state.buckets)
+      ref = Process.monitor(pid)
+      refs = HashDict.put(state.refs, ref, name)
+      :ets.insert(state.names, {name, pid})
+      GenEvent.sync_notify(state.events, {:create, name, pid})
+      {:reply, pid, %{state | refs: refs}} # Reply with pid
+  end
+end
+```
+
+我们简单的将回调从`handle_cast/2`更改为`handle_call/3`，然后将创建好的的“桶”进程号加入回复后返回响应。
+
+再次执行测试。这次我们将加入`--trace`选项：
+
+    $ mix test --trace
+
+当你测试是死锁或存在竞态竞争时`--trace`选项很有用，因为所有的测试将会同步执行（`async: true`无效）并将显示每个测试的详细信息。这次我们应该只有一个错误（可能会间歇性）：
+
+```
+1) test removes buckets on exit (KV.RegistryTest)
+   test/kv/registry_test.exs:48
+   Assertion with == failed
+   code: KV.Registry.lookup(ets, "shopping") == :error
+   lhs:  {:ok, #PID<0.103.0>}
+   rhs:  :error
+   stacktrace:
+     test/kv/registry_test.exs:52
+```
+
+根据失败信息，我们期望“桶“不存在于表中，但它仍在！这是我们刚解决问题的另一面：之前创建一个”桶“和更新表操作之间的存在延迟，现在处理”桶“进程死亡和从表中移除它之间也存在延迟。
+
+不幸的是，这次我们不能简单的修改`handle_info/2`进行同步操作。但是，我们可以使用事件管理器通知解决。让我们再看看`handle_info/2`的实现代码：
+
+```elixir
+def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+  # 5. Delete from the ETS table instead of the HashDict
+  {name, refs} = HashDict.pop(state.refs, ref)
+  :ets.delete(state.names, name)
+  GenEvent.sync_notify(state.event, {:exit, name, pid})
+  {:noreply, %{state | refs: refs}}
+end
+```
+
+注意到我们发送通知**之前**更新了ETS表。就是这个设计！这就意味着当我们收到`{:exit, name, pid}`通知，表更新已经完成了。让我们将未通过的测试修改如下:
+
+```elixir
+test "removes buckets on exit", %{registry: registry, ets: ets} do
+  KV.Registry.create(registry, "shopping")
+  {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+  Agent.stop(bucket)
+  assert_receive {:exit, "shopping", ^bucket} # Wait for event
+  assert KV.Registry.lookup(ets, "shopping") == :error
+end
+```
+
+我们简单的修改测试保证在调用`KV.Registry.lookup/2`之前，先确保收到`{:exit, name, pid}`信息。
+
+查看我们的测试不需要使用`:timer.sleep/1`或其他技巧是很重要的。大部分时间，执行断言前，我们可以依赖于事件，监控和消息来期望系统是在预期的状态中。
+
+方便起见，以下是所有通过的测试用例：
+
+```elixir
+defmodule KV.RegistryTest do
+  use ExUnit.Case, async: true
+
+  defmodule Forwarder do
+    use GenEvent
+
+    def handle_event(event, parent) do
+      send parent, event
+      {:ok, parent}
+    end
+  end
+
+  setup do
+    {:ok, sup} = KV.Bucket.Supervisor.start_link
+    {:ok, manager} = GenEvent.start_link
+    {:ok, registry} = KV.Registry.start_link(:registry_table, manager, sup)
+
+    GenEvent.add_mon_handler(manager, Forwarder, self())
+    {:ok, registry: registry, ets: :registry_table}
+  end
+
+  test "sends events on create and crash", %{registry: registry, ets: ets} do
+    KV.Registry.create(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+    assert_receive {:create, "shopping", ^bucket}
+
+    Agent.stop(bucket)
+    assert_receive {:exit, "shopping", ^bucket}
+  end
+
+  test "spawns buckets", %{registry: registry, ets: ets} do
+    assert KV.Registry.lookup(ets, "shopping") == :error
+
+    KV.Registry.create(registry, "shopping")
+    assert {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+
+    KV.Bucket.put(bucket, "milk", 1)
+    assert KV.Bucket.get(bucket, "milk") == 1
+  end
+
+  test "removes buckets on exit", %{registry: registry, ets: ets} do
+    KV.Registry.create(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+    Agent.stop(bucket)
+    assert_receive {:exit, "shopping", ^bucket} # Wait for event
+    assert KV.Registry.lookup(ets, "shopping") == :error
+  end
+
+  test "removes bucket on crash", %{registry: registry, ets: ets} do
+    KV.Registry.create(registry, "shopping")
+    {:ok, bucket} = KV.Registry.lookup(ets, "shopping")
+
+    # Kill the bucket and wait for the notification
+    Process.exit(bucket, :shutdown)
+    assert_receive {:exit, "shopping", ^bucket}
+    assert KV.Registry.lookup(ets, "shopping") == :error
+  end
+end
+```
+
+测试通过后，我们只需要在`lib/kv/superisor.ex`文件中更新监控器的`init/1`回调，将ETS表名作为参数传递给注册表子进程：
+
+```elixir
+@manager_name KV.EventManager
+@registry_name KV.Registry
+@ets_registry_name KV.Registry
+@bucket_sup_name KV.Bucket.Supervisor
+
+def init(:ok) do
+  children = [
+    worker(GenEvent, [[name: @manager_name]]),
+    supervisor(KV.Bucket.Supervisor, [[name: @bucket_sup_name]]),
+    worker(KV.Registry, [@ets_registry_name, @manager_name,
+                         @bucket_sup_name, [name: @registry_name]])
+  ]
+
+  supervise(children, strategy: :one_for_one)
+end
+```
+
+注意到我们使用`KV.Registry`作为ETS表名，因指向了使用它的模块，方便debug。ETS名和进程名保存与不同的注册表，这样就不会产生冲突。
+
+## 6.3 ETS作为持久化存储
+
+在注册表初始化的时候，我们创建了一个ETS表，当注册表终止的时候，我们没有将表关闭。这是因为ETS表是“链接”到创建它的进程上，如果这个进程挂了，表将会自动关闭。
+
+这样的默认行为是非常方便的，我们还可以使用它的更多好处。还记得注册表和”桶“监控器之间是互相依赖的。当注册表挂了，我们也希望”桶“监控器也终止，因为一旦注册表挂了，所有”桶“名称和”桶“进程之间的联系将全部丢失。可不可能就算注册表进程崩溃了，我们也持有这些信息？如果可以这么做，我们将解耦注册表和”桶“监控器，同时与`:one_for_one`策略完美匹配。
+
+需要修改一些地方来实现它。首先，需要在监控器内启动ETS表。其次，需要将表的访问权限从`:protected`到`:public`，因为表所有权是监控器，写操作仍然是由管理器进程来做。
+
+让我们先修改`KV.Supervisor`的`init/1`回调：
+
+```elixir
+def init(:ok) do
+  ets = :ets.new(@ets_registry_name,
+                 [:set, :public, :named_table, {:read_concurrency, true}])
+
+  children = [
+    worker(GenEvent, [[name: @manager_name]]),
+    supervisor(KV.Bucket.Supervisor, [[name: @bucket_sup_name]]),
+    worker(KV.Registry, [ets, @manager_name,
+                         @bucket_sup_name, [name: @registry_name]])
+  ]
+
+  supervise(children, strategy: :one_for_one)
+end
+```
+
+下一步，因为不需要创建表了，修改`KV.Registry`的`init/1`回调。只使用给定的参数：
+
+```elixir
+def init({table, events, buckets}) do
+  refs = HashDict.new
+  {:ok, %{names: table, refs: refs, events: events, buckets: buckets}}
+end
+```
+
+最后，我们只需要修改`test/kv/registry_test.exs`文件内的`setup`回调来创建ETS表。我们借此机会分割`setup`功能为方便以后使用的私有函数：
+
+```elixir
+setup do
+  ets = :ets.new(:registry_table, [:set, :public])
+  registry = start_registry(ets)
+  {:ok, registry: registry, ets: ets}
+end
+
+defp start_registry(ets) do
+  {:ok, sup} = KV.Bucket.Supervisor.start_link
+  {:ok, manager} = GenEvent.start_link
+  {:ok, registry} = KV.Registry.start_link(ets, manager, sup)
+
+  GenEvent.add_mon_handler(manager, Forwarder, self())
+  registry
+end
+```
+
+这些修改过后，我们的测试用例应该全绿！
+
+还有最后一个场景需要考虑：一旦我们收到ETS表，可能已经存在一个“桶”进程号。毕竟，这是所有更改的目的！然而，新的注册表没有监控这些“桶”，因为它们是以已经移除的注册表的一部分实现的。这也意味着表可能会陈旧，因为我们无法移除那些死亡的“桶”。
+
+让我们在`test/kv/registry_test.exs`文件中增加一个测试来重现这个bug:
+
+```elixir
+test "monitors existing entries", %{registry: registry, ets: ets} do
+  bucket = KV.Registry.create(registry, "shopping")
+
+  # Kill the registry. We unlink first, otherwise it will kill the test
+  Process.unlink(registry)
+  Process.exit(registry, :shutdown)
+
+  # Start a new registry with the existing table and access the bucket
+  start_registry(ets)
+  assert KV.Registry.lookup(ets, "shopping") == {:ok, bucket}
+
+  # Once the bucket dies, we should receive notifications
+  Process.exit(bucket, :shutdown)
+  assert_receive {:exit, "shopping", ^bucket}
+  assert KV.Registry.lookup(ets, "shopping") == :error
+end
+```
+
+执行新的测试，会以下面测试失败：
+
+```
+1) test monitors existing entries (KV.RegistryTest)
+   test/kv/registry_test.exs:72
+   No message matching {:exit, "shopping", ^bucket}
+   stacktrace:
+     test/kv/registry_test.exs:85
+```
+
+这是我们期望的。如果一个“桶”没有被监控到，当它挂的时候就不会通知注册表，也因此不会发送任何事件。我们最后一次更改`KV.Registry`的`init/1`回调，设置监控所有表内的项来修复这个问题：
+
+```elixir
+def init({table, events, buckets}) do
+  refs = :ets.foldl(fn {name, pid}, acc ->
+    HashDict.put(acc, Process.monitor(pid), name)
+  end, HashDict.new, table)
+
+  {:ok, %{names: table, refs: refs, events: events, buckets: buckets}}
+end
+```
+
+我们使用`:ets.foldl/3`来访问表的所有的项，与`Enum.reduce/3`类似，在每个元素和给定的状态上调用给定的函数。函数回调中，我们监控每个表中的进程号，更新引用字典。如果任何一个项已经挂了，我们扔将接收`:DOWN`信息用来稍后更新。
+
+这一章，我们使用了在监控下并传递到注册表的ETS表，这使得目前的程序更健壮了。我们也探索了如何使用ETS作为缓存，讨论了 服务器和所有的客户端之间数据共享可能涉及到的竞态竞争。
