@@ -6,3 +6,4 @@ mix and otp
 + [GenEvent](/getting_started/mix_and_otp/4.markdown)
 + [Supervisor和Application](/getting_started/mix_and_otp/5.markdown)
 + [ETS](/getting_started/mix_and_otp/6.markdown)
++ [依赖和“雨伞”项目](/getting_started/mix_and_otp/7.markdown)

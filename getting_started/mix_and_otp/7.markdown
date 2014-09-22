@@ -1,0 +1,259 @@
+这一章，我们将简要的讨论如何在mix管理依赖。
+
+我们的`kv`程序完成了，所以是实现服务器来处理在第一章定义的请求的时候了。
+
+```
+CREATE shopping
+OK
+
+PUT shopping milk 1
+OK
+
+PUT shopping eggs 3
+OK
+
+GET shopping milk
+1
+OK
+
+DELETE shopping eggs
+OK
+```
+
+然而，为了避免给`kv`程序增加更多的代码， 我们要给`kv`建立客户端程序--TCP服务器。因为整个runtime和Elixir环境都是面向程序的，所以将我们的项目分隔成小的、可以协同工作的程序比构建一个大的、单个的程序要合理。
+
+在创建我们的程序之前，我们必须讨论下mix如何解决依赖问题。实际项目中，我们经常打交道的依赖有两种：内部和外部依赖。Mix均有机制支持它们。
+
+## 7.1 外部依赖
+
+外部依赖是不与业务逻辑绑定的。例如，假如你的分布式键值程序需要一个HTTP API，你可以使用[Plug](http://github.com/elixir-lang/plug)项目作为外部依赖。
+
+安装外部依赖很简单。通常，我们使用[Hex包管理器](http://hex.pm)在`mix.exs`文件内的deps函数列出依赖。
+
+```elixir
+def deps do
+  [{:plug, "~> 0.5.0"}]
+end
+```
+
+这个依赖指向已经推送到Hex的0.5.x系列最新版本的plug，`~>`说明了在这个版本之前。更多关于指定版本需求的信息，请看[版本模块文档](http://elixir-lang.org/docs/stable/elixir/Version.html)
+
+通常，稳定版本会推送到Hex。如果你的外部依赖处于开发中，Mix也可以管理git依赖：
+
+```elixir
+def deps do
+  [{:plug, git: "git://github.com/elixir-lang/plug.git"}]
+end
+```
+
+当项目增加一个依赖后，你将会看到Mix生成一个`mix.lock`文件来保证可以*重复构建*。这个lock文件必须加入你的版本控制系统中，来保证使用项目的人可以使用和你相同的版本依赖。
+
+Mix提供很多任务来解决依赖，你可以使用`mix help`查询：
+
+    $ mix help
+    mix deps              # List dependencies and their status
+    mix deps.clean        # Remove the given dependencies' files
+    mix deps.compile      # Compile dependencies
+    mix deps.get          # Get all out of date dependencies
+    mix deps.unlock       # Unlock the given dependencies
+    mix deps.update       # Update the given dependencies
+
+最常用的是`mix deps.get`和`mix deps.update`。依赖一旦取回，将会自动编译。使用`mix help deps`和在[`Mix.Tasks.Deps模块文档](http://elixir-lang.org/docs/stable/mix/Mix.Tasks.Deps.html)你可以学习更多关于依赖的信息 。
+
+## 7.2 内部依赖
+
+内部依赖是特定于您的项目。它们通常与项目之外的公司/组织不相关。无论基于技术、经济或商业原因，大多数时候它们保持私有。
+
+如果你有一个内部依赖，Mix提供了两种方法:git库或雨伞项目(umbrella projects)。
+
+例如，如果你将`kv`项目推送到了一个git仓库，为了使用它你只需要在将它列入你的依赖中即可：
+
+```elixir
+def deps do
+  [{:kv, git: "git://github.com/YOUR_ACCOUNT/kv.git"}]
+end
+```
+
+git仓库是否公开不重要，只要你有权限，Mix都能够为你取回来。
+
+然而，内部依赖使用git仓库在Elixir是不推荐的。要知道运行环境和Elixir系统已经给你提供了程序这样的概念。这样的话，我们期望将你的代码可以分隔为在逻辑组织上的程序、甚至一个单独的项目。
+
+但是，如果将每一个程序作为一个单独的项目推送到git仓库，你的项目将会变得难以维护，因为管理这些git仓库将花费比你写代码更多的时间。
+
+基于这个原因，Mix支持“雨伞项目”。雨伞项目允许你创建一个管理多个程序的项目并将它们推送到单一的一个git仓库中。这就是我们下一节将要探索的风格。
+
+我们将要创建一个新的mix项目。我们将它命名为`kv_umbrella`，这个新项目将包含我们已经存在的`kv`程序和新的`kv_server`程序。目录解构如下所示：
+
+    + kv_umbrella
+      + apps
+        + kv
+        + kv_server
+
+有趣的地方是，Mix提供了很多方便的功能支持这样的程序，如只用一个命令就可以编译和测试所有在`apps`内的所有程序。然而，尽管都列在`apps`目录下，它们仍旧是彼此解耦的，如果你愿意，你可以单独的构建，测试和部署每个程序。
+
+所以让我们开始吧！
+
+## 7.3 雨伞程序
+
+让我们使用`mix new`新建一个项目。这个项目会命名为`kv_umbrella`，创建时需要将`--umbrella`作为选项。不要在已存在的`kv`项目内创建这个项目！
+
+    $ mix new kv_umbrella --umbrella
+    * creating .gitignore
+    * creating README.md
+    * creating mix.exs
+    * creating apps
+    * creating config
+    * creating config/config.exs
+
+从打印出的信息可以看到生成的文件很少。所生成的`mix.exs`文件也不相同。让我们看一看(注释已移除):
+
+```elixir
+defmodule KvUmbrella.Mixfile do
+  use Mix.Project
+
+  def project do
+    [apps_path: "apps",
+     deps: deps]
+  end
+
+  defp deps do
+    []
+  end
+end
+```
+
+与之前创建的项目不同在于，项目定于中多了一个简单的条目`apps_path: "apps"`。意思是说它将像个雨伞。尽管它们可以有仅对自己可用的依赖，但是这样的项目既没有源码也没有测试。我们将在apps目录内创建新的程序项目，这些程序项目叫“子雨伞程序”。
+
+让我们进入apps目录然后开始构建`kv_server`。这次，我们将传递`--sup`标志，告诉mix自动为我们生成监控树，而不是像之前一样手动创建：
+
+    $ cd kv_umbrella/apps
+    $ mix new kv_server --module KVServer --sup
+
+和我们第一次生成`kv`类似，只有少许的不同。打开`mix.exs`文件：
+
+```elixir
+defmodule KVServer.Mixfile do
+  use Mix.Project
+
+  def project do
+    [app: :kv_server,
+     version: "0.0.1",
+     deps_path: "../../deps",
+     lockfile: "../../mix.lock",
+     elixir: "~> 0.14.1-dev",
+     deps: deps]
+  end
+
+  def application do
+    [applications: [],
+     mod: {KVServer, []}]
+  end
+
+  defp deps do
+    []
+  end
+end
+```
+
+首先，因为我们在`kv_umbrella/apps`目录下这个项目，Mix自动的检测到了雨伞解构，然后在项目定义中增加了两行：
+
+```elixir
+deps_path: "../../deps",
+lockfile: "../../mix.lock",
+```
+
+选项意思是所有的依赖将会放如`kv_umbrella/deps`目录，它们将共享同一个lock文件。这两行是说如果两个程序共享相同的依赖，讲不会获取两次。只会获取依次，Mix将会确保两个程序运行在相同版本的共享依赖。
+
+第二个不同之处在`mix.exs`文件内的`application`函数：
+
+```elixir
+def application do
+  [applications: [],
+   mod: {KVServer, []}]
+end
+```
+
+因为我们传递了`--sup`标志，Mix自动的增加了`mod: {KVServer,[]}`,指定为我们的程序回调模块。`KVServer`将会启动我们的监控树。
+
+实际上，打开`lib/kv_server.ex`:
+
+```elixir
+defmodule KVServer do
+  use Application
+
+  def start(_type, _args) do
+    import Supervisor.Spec, warn: false
+
+    children = [
+      # worker(KVServer.Worker, [arg1, arg2, arg3])
+    ]
+
+    opts = [strategy: :one_for_one, name: KVServer.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+注意到它定义了程序回调函数`start/2`,然后用内联方式方便的定义了监控器，代替使用`Supervisor`模块来定义`KVServer.Supervisor`。你可以在[监控器模块文档](http://elixir-lang.org/docs/stable/elixir/Supervisor.html)看到更多关于监控器信息。
+
+我们已经尝试了第一个子雨伞项目。我们可以在`apps/kv_server`目录下执行测试，这太无聊咯。取而代之，我们将在雨伞项目的更目录执行`mix test`：
+
+    $ mix test
+
+它成功了！
+
+因为我们最终想要的是`kv_server`使用定义过的`kv`的功能，需要将`kv`作为我们程序的依赖。
+
+## 7.4 雨伞内依赖
+
+Mix有一个简单的机制支持一个子雨伞项目依赖另一个子雨伞。打开`apps/kv_server/mix.exs`然后更改`deps/0`函数如下：
+
+```elixir
+defp deps do
+  [{:kv, in_umbrella: true}]
+end
+```
+
+上面这行使得`:kv`可以作为`:kv_server`的内部依赖。我们可以调用`:kv`内定义的模块，但是无法自动自动`:kv`程序。因此，我们仍需要在`application/0`函数内将`:kv`作为程序列出。
+
+```elixir
+def application do
+  [applications: [:kv],
+   mod: {KVServer, []}]
+end
+```
+
+现在Mix将保证`:kv`将在`:kv_server`程序启动前启动。
+
+最后，将我们创建的`kv`程序拷贝到新的雨伞项目的`apps`目录下。最终的目录结构应该和我们之前提到的相同：
+
+    + kv_umbrella
+      + apps
+        + kv
+        + kv_server
+
+现在我们只需要修改`apps/kv/mix.exs`来包含我们已经在`apps/kv_server/mix.exs`见过的雨伞程序条目。打开`apps/kv/mix.exs`添加到`project`函数：
+
+```elixir
+deps_path: "../../deps",
+lockfile: "../../mix.lock",
+```
+
+现在你可以在雨伞目录使用`mix test`为两个项目执行测试。太美了！
+
+记住雨伞项目目的是方便的帮助你组织和管理你的程序。`apps`文件夹内的程序依旧互相解耦。每一个程序都有它独立的配置，它们之间的依赖必须明确列出。允许它们一起开发，且如果需要也可以单独的编译、测试和部署。
+
+## 7.5 总结
+
+这一章，我们已经学习了更多关于Mix依赖和雨伞项目。我们决定新建一个雨伞项目，因为考虑到`kv`和`kv_server`只是在项目环境中的内部依赖。
+
+你将会注意到，未来你写程序可以轻易地释放更简单的单元，可以被不同的项目使用。到那时，解决依赖的正确方式是使用git或hex。
+
+当你解决依赖时，有一些问题你可以问问自己。以“这个程序放在项目外是否正确?”问题开始：
+
+* 如果否，使用雨伞项目和自雨伞项目。
+* 如果是，这个项目可以共享到公司/组织外吗？
+  * 如果否，使用私有Git仓库。
+  * 如果是，将你的代码推送到git仓库，使用[Hex](http://hex.pm)进行持续更新。
+
+雨伞项目已经跑起来了，是时候开始写我们的服务器了。
