@@ -1,0 +1,286 @@
+这一章，我们将学习如何使用[Erlang的`:gen_tcp`模块](http://erlang.org/doc/man/gen_tcp.html)接受请求。未来章节将会扩展我们的服务器，让它可以接受指令。这也给探索Elixir任务(`Task`)模块提供了一个很好的机会。
+
+## 8.1 回应服务器
+
+实现TCP服务器将先从实现一个回应（echo）服务器开始。它将接收到的一个文本请求，然后简单的返回一个响应。我们将一点点改进它，直至处于监控器下并准备好处理多个请求。
+
+广义上讲，一个TCP服务器执行以下步骤:
+
+1. 侦听端口直至端口可用,它持有套接字
+2. 等待并接收客户端连接这个端口
+3. 读取客户端请求,并返回响应
+
+让我们实现上述步骤。在`apps/kv_server`程序下打开`lib/kv_server.ex`文件，增加下面这个函数：
+
+```elixir
+def accept(port) do
+  # The options below mean:
+  #
+  # 1. `:binary` - receives data as binaries (instead of lists)
+  # 2. `packet: :line` - receives data line by line
+  # 3. `active: false` - block on `:gen_tcp.recv/2` until data is available
+  #
+  {:ok, socket} = :gen_tcp.listen(port,
+                    [:binary, packet: :line, active: false])
+  IO.puts "Accepting connections on port #{port}"
+  loop_acceptor(socket)
+end
+
+defp loop_acceptor(socket) do
+  {:ok, client} = :gen_tcp.accept(socket)
+  serve(client)
+  loop_acceptor(socket)
+end
+
+defp serve(client) do
+  client
+  |> read_line()
+  |> write_line(client)
+
+  serve(client)
+end
+
+defp read_line(socket) do
+  {:ok, data} = :gen_tcp.recv(socket, 0)
+  data
+end
+
+defp write_line(line, socket) do
+  :gen_tcp.send(socket, line)
+end
+```
+
+我们将使用`KVServer.accpet(4040)`来启动服务器，4040是端口号。`accept/1`的第一步是套接字可用前监听这个地址，然后调用`loop_acceptor/1`。`loop_acceptor/1`只用来循环接收客户端连接。对每个接受的连接，我们调用`serve/1`函数。
+
+`serve/`函数是另一个循环，用来从套接字读取一行，然后再把这些行写回到套接字。注意到`serve/1`函数使用了[管道符](http://elixir-lang.org/docs/stable/elixir/Kernel.html#|>/2)来描述操作流程。管道符将左边的结果作为第一个参数传递给右边的函数。上面的例子：
+
+```elixir
+socket |> read_line() |> write_line(socket)
+```
+
+等价：
+
+```elixir
+write_line(read_line(socket), socket)
+```
+
+> 使用`|>`操作符时，为搞清楚运算符是如何工作，函数调用增加括号是很重要的。特别是下面这个代码：
+>
+>     1..10 |> Enum.filter &(&1 <= 5) |> Enum.map &(&1 * 2)
+>
+> 实际被解读为
+>
+>     1..10 |> Enum.filter(&(&1 <= 5) |> Enum.map(&(&1 * 2)))
+>
+> Which is not what we want, since the function given to `Enum.filter/2` is the one passed as first argument to `Enum.map/2`. The solution is to use explicit parentheses:
+> 这不是我们想要的，因为函数`Enum.filter/2`是作为第一个参数返回给`Enum.map/2`的。解决方式就是明确使用括号：
+>
+>     1..10 |> Enum.filter(&(&1 <= 5)) |> Enum.map(&(&1 * 2))
+>
+
+`read_line/1`使用`:gen_tcp.recv/2`实现数据接收。`write_line/2`使用`:gen_tcp.send/2`发送数据。
+
+这就是为了实现响应服务器所有我们需要做的。让我们试一试！
+
+在`kv_server`程序内使用`iex -S mix`打开会话。在IEx内，运行：
+
+```elixir
+iex> KVServer.accept(4040)
+```
+
+服务器现在运行起来了，你甚至发现了控制台也被阻塞了。使用[`telnet`客户端](http://en.wikipedia.org/wiki/Telnet)接入到我们服务器。大多数的系统都有telnet客户端，命令也大部分都类似：
+
+    $ telnet 127.0.0.1 4040
+    Trying 127.0.0.1...
+    Connected to localhost.
+    Escape character is '^]'.
+    hello
+    hello
+    is it me
+    is it me
+    you are looking for?
+    you are looking for?
+
+敲入"hello",回车后，你将会得到一个"hello"响应。太棒了！
+
+我的这个telnet客户端可以使用`ctrl + ]`退出，敲入`quit`然后按`<Enter>`，你的客户端可能需要不同的方式退出。
+
+当退出telnet客户端，在IEx中很可能看到一个错误:
+
+    ** (MatchError) no match of right hand side value: {:error, :closed}
+        (kv_server) lib/kv_server.ex:41: KVServer.read_line/1
+        (kv_server) lib/kv_server.ex:33: KVServer.serve/1
+        (kv_server) lib/kv_server.ex:27: KVServer.loop_acceptor/1
+
+这是因为我们期望从`:gen_tcp.recv/2`接收数据，但是客户端关闭了连接。我们需要在之后的版本处理这种情况。
+
+现在我们有更大的bug需要解决：TCP接收端崩溃了将会发生什么？因为没有监控器，服务器挂了的话就不会重启，也就不能处理更多的请求。这也是必须将服务器移至监控树下的原因。
+
+## 8.2 任务
+
+我们学习了agents,通用服务器和事件管理器。它们都是为了处理多个消息或管理状态。但是当我们只需要执行一些任务时候用什么呢？
+
+[任务(Task)模块](http://elixir-lang.org/docs/stable/elixir/Task.html)提供了我们想要的。例如，它有一个接受一个模块、函数和参数的函数`start_link/3`，它用来作为监控树的一部分执行指定的函数。
+
+让我们试一试。打开`lib/kv_server.ex`文件，让我们修改`start/2`函数内的监控器：
+
+```elixir
+def start(_type, _args) do
+  import Supervisor.Spec
+
+  children = [
+    worker(Task, [KVServer, :accept, [4040]])
+  ]
+
+  opts = [strategy: :one_for_one, name: KVServer.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+修改后，可以说我们想让`KVServer.accept(4040)`作为一个子进程运行。现在我们硬编码了端口，稍后我们将讨论能更改端口的方法。
+
+现在服务器成为了监控树的一部分，当我们运行程序的时候应该可以自动启动。终端内输入`mix run --no-halt`，使用`telnet`客户端确保一切正常：
+
+    $ telnet 127.0.0.1 4040
+    Trying 127.0.0.1...
+    Connected to localhost.
+    Escape character is '^]'.
+    say you
+    say you
+    say me
+    say me
+
+好，没问题！如果客户端断开，将会导致服务器崩溃，你将会看到另外一个服务器马上又马上启动起来了。然而，它能*扩展*么？
+
+尝试同一时间段连接两个telnet客户端，你会发现第二个客户端得不到服务器的响应：
+
+    $ telnet 127.0.0.1 4040
+    Trying 127.0.0.1...
+    Connected to localhost.
+    Escape character is '^]'.
+    hello
+    hello?
+    HELLOOOOOO?
+
+服务器完全不能工作。这是因为我们在同一个进程内接受请求。当一个客户端接入后，我们无法接受另一个客户端。
+
+## 8.3 任务监控器
+
+为了使服务器能够同时处理多个连接，我们需要让一个进程作为接收端生成其他的进程来处理请求。解决方法是：
+
+```elixir
+defp loop_acceptor(socket) do
+  {:ok, client} = :gen_tcp.accept(socket)
+  serve(client)
+  loop_acceptor(socket)
+end
+```
+
+使用和`Task.start_link/3`类似的`Task.start_link/1`，只是它接受一个匿名的函数而不是模块、函数和参数：
+
+```elixir
+defp loop_acceptor(socket) do
+  {:ok, client} = :gen_tcp.accept(socket)
+  Task.start_link(fn -> serve(client) end)
+  loop_acceptor(socket)
+end
+```
+
+记得吗？我们已经犯过一次类似的错误。
+
+这和我们从注册表调用`KV.Bucket.start_link/0`时所犯的错误类似。就是说任何“桶”的失败将会导致所有的注册表挂掉。
+
+上面的代码有同样的问题：如果我们将`serve(client)`的任务与接收端链接，当处理请求时崩溃将会使得接收端和其他所有链接挂掉。
+
+解决注册表问题是使用了简单一对一策略的监控器。这里使用同样的方法，由于这种问题太普遍以至于任务模块自带了解决方法：一个临时子进程和简单的一对一策略，直接可以用于我们的管理树！
+
+让我们再次修改`start/2`函数，给监控树增加一个监控器：
+
+```elixir
+def start(_type, _args) do
+  import Supervisor.Spec
+
+  children = [
+    supervisor(Task.Supervisor, [[name: KVServer.TaskSupervisor]]),
+    worker(Task, [KVServer, :accept, [4040]])
+  ]
+
+  opts = [strategy: :one_for_one, name: KVServer.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+我们已`KVServer.TaskSupervisor`为名，启动一个[`Task.Supervisor`](/docs/stable/elixir/Task.Supervisor.html)。记住，因为接收端依赖于这个监控器，监控器必须先启动.
+
+现在我们只需要修改`loop_acceptor/2`来使用`Task.Supervisor`处理每个请求：
+
+```elixir
+defp loop_acceptor(socket) do
+  {:ok, client} = :gen_tcp.accept(socket)
+  Task.Supervisor.start_child(KVServer.TaskSupervisor, fn -> serve(client) end)
+  loop_acceptor(socket)
+end
+```
+
+使用`mix run --no-halt`启动一个新服务器，我们现在就可以同时使用多个telnet客户端。你同样注意到了客户端退出也不会使接收端挂掉。太棒了！
+
+Here is the full echo server implementation, in a single module:
+以下是在一个模块内，整个回应服务器的实现代码：
+
+```elixir
+defmodule KVServer do
+  use Application
+
+  @doc false
+  def start(_type, _args) do
+    import Supervisor.Spec
+
+    children = [
+      supervisor(Task.Supervisor, [[name: KVServer.TaskSupervisor]]),
+      worker(Task, [KVServer, :accept, [4040]])
+    ]
+
+    opts = [strategy: :one_for_one, name: KVServer.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+
+  @doc """
+  Starts accepting connections on the given `port`.
+  """
+  def accept(port) do
+    {:ok, socket} = :gen_tcp.listen(port,
+                      [:binary, packet: :line, active: false])
+    IO.puts "Accepting connections on port #{port}"
+    loop_acceptor(socket)
+  end
+
+  defp loop_acceptor(socket) do
+    {:ok, client} = :gen_tcp.accept(socket)
+    Task.Supervisor.start_child(KVServer.TaskSupervisor, fn -> serve(client) end)
+    loop_acceptor(socket)
+  end
+
+  defp serve(socket) do
+    socket
+    |> read_line()
+    |> write_line(socket)
+
+    serve(socket)
+  end
+
+  defp read_line(socket) do
+    {:ok, data} = :gen_tcp.recv(socket, 0)
+    data
+  end
+
+  defp write_line(line, socket) do
+    :gen_tcp.send(socket, line)
+  end
+end
+```
+
+因为我们修改了监控器，这就要问：我们的监控策略是否依然正确？
+
+就这个项目而言，回答是肯定的：如果接收端崩溃了，不需要让已连接的接收端崩溃。另一方面，如果任务监控器挂了，也没必要让接收端崩溃。和注册表相比，在我们使用ETS持久化状态之前，每次注册表崩溃的时候我们不得不让监控器崩溃。任务则是无状态且它们中的一个挂了也不会导致任何事情变遭。
+
+下一章，将完成我们的服务器，开始解析客户端请求和发送回应。
