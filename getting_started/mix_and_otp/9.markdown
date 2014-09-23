@@ -115,7 +115,7 @@ arguments return an error:
 """
 ```
 
-With doctests at hand, it is your turn to make tests pass! Once you're ready, you can compare your work with our solution below:
+针对目前的文档测试，轮到你来让测试通过了！一旦准备好了，将你的成果和下面的解决方法比较：
 
 ```elixir
 def parse(line) do
@@ -129,9 +129,9 @@ def parse(line) do
 end
 ```
 
-Notice how we were able to elegantly parse the commands without adding a bunch of `if/else` clauses that check the command name and number of arguments!
+请注意我们是如何在没有使用`if/else`语句检查命令名称和参数数量的情况下完美的解析这些命令的。
 
-Finally, you may have observed that each doctest was considered to be a different test in our test case, as our test suite now reports a total of 7 tests. That is because ExUnit considers the following to define two different tests:
+最后，我们的测试用例报告了总共有七个测试，你可能注意到了每个文档测试都会被当做一个不同的测试。因为ExUnit将下面的代码看做不同的测试：
 
 ```iex
 iex> KVServer.Command.parse "UNKNOWN shopping eggs\r\n"
@@ -141,7 +141,7 @@ iex> KVServer.Command.parse "GET shopping\r\n"
 {:error, :unknown_command}
 ```
 
-Without new lines, as seen below, ExUnit compiles it into a single test:
+像下面这样，没有新行的话ExUnit将它们编译为一个测试：
 
 ```iex
 iex> KVServer.Command.parse "UNKNOWN shopping eggs\r\n"
@@ -150,11 +150,10 @@ iex> KVServer.Command.parse "GET shopping\r\n"
 {:error, :unknown_command}
 ```
 
-You can read more about doctests in [the `ExUnit.DocTest` docs](/docs/stable/ex_unit/ExUnit.DocTest.html).
+你可以在[`ExUnit.DocTest`文档](http://elixir-lang.org/docs/stable/ex_unit/ExUnit.DocTest.html)阅读到更多信息。
+## 9.2 管道符
 
-## 9.2 Pipelines
-
-With our command parser in hand, we can finally start implementing the logic that runs the commands. Let's add a stub definition for this function for now:
+使用目前的解析方法， 我们终于可以开始实现执行这些命令的逻辑。让我们现在增加一个预定义的函数：
 
 ```elixir
 defmodule KVServer.Command do
@@ -167,7 +166,7 @@ defmodule KVServer.Command do
 end
 ```
 
-Before we implement this function, let's change our server to start using our new `parse/1` and `run/1` functions. Remember, our `read_line/1` function was also crashing when the client closed the socket, so let's take the opportunity to fix it, too. Open up `lib/kv_server.ex` and replace the existing server definition:
+实现这个函数之前，让我们修改服务器，使用新的`parse/1`和`run/1`函数启动。记住，当客户端关闭的时候`read_line`函数就会崩溃，所以让我们先修改它。打开`lib/kv_server/ex`文件，将已存在的服务器定义：
 
 ```elixir
 defp serve(socket) do
@@ -188,7 +187,7 @@ defp write_line(line, socket) do
 end
 ```
 
-with the following:
+替换为：
 
 ```elixir
 defp serve(socket) do
@@ -222,7 +221,7 @@ defp format_msg({:error, :unknown_command}), do: "UNKNOWN COMMAND\r\n"
 defp format_msg({:error, _}), do: "ERROR\r\n"
 ```
 
-If we start our server, we can now send commands to it. For now we will get two different responses: "OK" when the command is known and "UNKNOWN COMMAND" otherwise:
+如果启动服务器，我们就可以给它发送命令。目前我们将会得到两种不同的回应：命令已知时的“OK”和其他情况的"UNKNOWN COMMAND":
 
     $ telnet 127.0.0.1 4040
     Trying 127.0.0.1...
@@ -233,19 +232,19 @@ If we start our server, we can now send commands to it. For now we will get two 
     HELLO
     UNKNOWN COMMAND
 
-This means our implementation is going in the correct direction, but it doesn't look very elegant, does it?
+也就意味这我们在正确的方向上，但是看上去不是那么优雅，是不？
 
-The previous implementation used pipes which made the logic straight-forward to understand:
+之前使用管道符的实现逻辑简单易懂：
 
 ```elixir
 read_line(socket) |> KVServer.Command.parse |> KVServer.Command.run()
 ```
 
-Since we may have failures along the way, we need our pipeline logic to match error outputs and abort if they occur. Wouldn't it be great if instead we could say: "pipe these functions while the response is `:ok`" or "pipe these functions while the response matches the `{:ok, _}` tuple"?
+伴随着错误，我们需要管道符逻辑匹配错误输出并终止它们。“当响应是`:ok`或匹配`{:ok, _}`元组的时候，传递这些函数。”这么说是不是更好一点？
 
-Thankfully, there is a project called [elixir-pipes](https://github.com/batate/elixir-pipes) that provides exactly this functionality! Let's give it a try.
+谢天谢地，有个叫[elixir-pipes](https://github.com/batate/elixir-pipes)的项目提供了这个功能！让我们试一试。
 
-Open up your `apps/kv_server/mix.exs` file and change both `application/0` and `deps/0` functions to the following:
+打开`apps/kv_server/mix.exs`文件然后更改`application/0`和`deps/0`函数如下：
 
 ```elixir
 def application do
@@ -259,7 +258,7 @@ defp deps do
 end
 ```
 
-Run `mix deps.get` to get the dependency, and rewrite the `serve/1` function to use the `pipe_matching/3` functionality now available to us:
+执行`mix deps.get`获取依赖，然后使用现在可用的`pipe_matching/3`函数重写`serve/1`：
 
 ```elixir
 defp serve(socket) do
@@ -276,13 +275,13 @@ defp serve(socket) do
 end
 ```
 
-With `pipe_matching/3` we can ask Elixir to pipe the value `x` from each step if it matches `{:ok, x}`. We do so by basically converting each expression given to `case/2` as a step in the pipeline. As soon as any of the steps return something that does not match `{:ok, x}`, the pipeline aborts, and returns the non-matching value.
+使用`pipe_matching/3`可以让Elixir将每一步如果匹配`{:ok. x}`的`x`传递。我们基本上是将每一个`case/2`表达式转换为一个管道操作。只要任何步骤与`{:ok,x}`不匹配，管道将终止并返回不匹配的值。
 
-Excellent! Feel free to read the [elixir-pipes](https://github.com/batate/elixir-pipes) project documentation to learn about other options for expressing pipelines. Let's continue moving forward with our server implementation.
+太棒了！随便阅读[elixir-pipes](https://github.com/batate/elixir-pipes)项目文档学习表达管道符的其他选项。让我们继续实现服务器。
 
-## 9.3 Running commands
+## 9.3 执行命令
 
-The last step is to implement `KVServer.Command.run/1`, to run the parsed commands against the `:kv` application. Its implementation is shown below:
+最后一步是实现`KVServer.Command.run/1`函数，使用`:kv`程序执行解析过的命令。方法如下所示：
 
 ```elixir
 @doc """
@@ -324,11 +323,11 @@ defp lookup(bucket, callback) do
 end
 ```
 
-The implementation is straightforward: we just dispatch to the `KV.Registry` server that we registered during the `:kv` application startup.
+实现很简单：我们只需要将命令分发到`:kv`程序启动时注册的`KV.Registry`注册表服务器。
 
-Note that we have also defined a private function named `lookup/2` to help with the common functionality of looking up a bucket and returning its `pid` if it exists, `{:error, :not_found}` otherwise.
+注意我们也定义了一个叫`lookup/2`的私有函数来实现查找“桶”的通用功能，如果存在，返回`pid`，否则`{:error, :not_found}`。
 
-By the way, since we are now returning `{:error, :not_found}`, we should amend the `format_msg/1` function in `KV.Server` to nicely show not found messages too:
+顺便说下，因为现在返回`{:error, :not_found}`,我们修改在`KV.Server`中的`format_msg/1`函数来更好的显示没有找到的消息：
 
 ```elixir
 defp format_msg({:ok, text}), do: text
@@ -337,11 +336,12 @@ defp format_msg({:error, :not_found}), do: "NOT FOUND\r\n"
 defp format_msg({:error, _}), do: "ERROR\r\n"
 ```
 
-And our server functionality is almost complete! We just need to add tests. This time, we have left tests for last because there are some important considerations to be made.
+服务器功能快完成了!我们只需要增加测试。这一次，因为还有一些重要的决定要做，我们留下了最后的测试 。
 
-`KVServer.Command.run/1`'s implementation is sending commands directly to the server named `KV.Registry`, which is registered by the `:kv` application. This means this server is global and if we have two tests sending messages to it at the same time, our tests will conflict with each other (and likely fail). We need to decide between having unit tests that are isolated and can run asynchronously, or writing integration tests that work on top of the global state, but exercise our application's full stack as it is meant to be exercised in production.
+`KVServer.Command.run/1`的实现是直接发送命令到在`:kv`程序中注册的，叫`KV.Registry`的服务器。意思是这个服务器是全局的，如果同一时间有两个测试发送消息，测试将会冲突（很可能测试失败）。需要决定是做有隔离的异步执行单元测试，还是在全局状态之上写集成测试，毕竟测试全栈程序意味在生产环境中进行。
 
 So far we have been chosing the unit test approach. For example, in order to make `KVServer.Command.run/1` testable as a unit we would need to change its implementation to not send commands directly to the `KV.Registry` process but instead pass a server as argument. This means we would need to change `run`'s signature to `def run(command, pid)` and the implementation for the `:create` command would look like:
+
 
 ```elixir
 def run({:create, bucket}, pid) do
