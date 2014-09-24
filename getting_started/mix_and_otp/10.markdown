@@ -1,45 +1,34 @@
----
-layout: getting_started
-title: 10 Distributed tasks and configuration
-guide: 10
-last: true
----
+在这最后一章,我们将回到`:kv`应用程序然后添加一个路由层,允许我们分发基于桶名字节点之间的请求。
 
-# {{ page.title }}
-
-  <div class="toc"></div>
-
-In this last chapter, we will go back to the `:kv` application and add a routing layer that allows us to distribute requests between nodes based on the bucket name.
-
-The routing layer will receive a routing table of the following format:
+路由层将收到一个下面格式的路由表:
 
     [{?a..?m, :"foo@computer-name"},
      {?n..?z, :"bar@computer-name"}]
 
-The router will check the first byte of the bucket name against the table and dispatch to the appropriate node based on that. For example, a bucket starting with the letter "a" (`?a` represents the Unicode codepoint of the letter "a") will be dispatched to node `foo@computer-name`.
+路由器在路由表内检索“桶”名的第一个字节，然后根据检索结果分派合适的节点。例如，一个“桶”的名称以"a"开头(`?a`表示字母"a"的unicode码位)将会被分派到`foo@computer-name`节点。
 
-If the matching entry points to the node evaluating the request, then we've finished routing, and this node will perform the requested operation. If the matching entry points to a different node, we'll pass the request to this node, which will look at its own routing table (which may be different from the one in the first node) and act accordingly. If no entry matches, an error will be raised.
+如果匹配的条目指向处理请求的节点，路由工作就完成了，这个节点将会执行请求的操作。如果匹配的条目指向一个不同的节点，将请求传递都这个节点，然后根据自己的路由表（可能和第一个节点的路由表不同）执行。如果没有条目匹配，将会抛出错误。
 
-You may wonder why we don't simply tell the node we find in our routing table to perform the requested operation directly, but instead pass the routing request on to that node to process. While a routing table as simple as the one above might reasonably be shared between all nodes, passing on the routing request in this way makes it much simpler to break the routing table into smaller pieces as our application grows. Perhaps at some point, `foo@computer-name` will only be responsible for routing bucket requests, and the buckets it handles will be dispatched to different nodes. In this way, `bar@computer-name` does not need to know anything about this change.
+你或许想知道为什么不让由自己路由表查找到的节点直接处理操作，而是传递路由请求到那个处理。像上面这样简单的路由表或许要在所有节点之间共享，以这种方式传递路由请求的原因是随着应用程序增长，可以更简单的将路由表分成较小的部分。或许以后,`foo@computer-name`只会负责“桶”的路由请求,桶处理器则会被派往不同的节点。这样,`bar@computer-name`不需要知道任何变化的信息。
 
-> Note: we will be using two nodes in the same machine throughout this chapter. You are free to use two (or more) different machines in the same network but you need to do some prep work. First of all, you need to ensure all machines have a `~/.erlang.cookie` file with exactly the same value. Second, you need to guarantee [epmd](http://www.erlang.org/doc/man/epmd.html) is running on a port that is not blocked (you can run `epmd -d` for debug info). Third, if you want to learn more about distribution in general, we recommend [this great Distribunomicon chapter from Learn You Some Erlang](http://learnyousomeerlang.com/distribunomicon).
+> 注意：本章我们将在一台机器上使用两个节点。你也可以使用同一网络环境中两个（或更多）的机器，前提是要做预备工作。首先，要确保所有机器的`～/.erlang.cookie`文件内有相同的值。其次，确保[epmd](http://www.erlang.org/doc/man/epmd.html)运行的端口没有被阻拦（可以使用`epmd -d`获取调试信息）。如果你想学习更多关于分布的常用信息，我们建议看看[Learn You Some Erlang的Distribunomicon这一章](http://learnyousomeerlang.com/distribunomicon)。
 
-## 10.1 Our first distributed code
+## 10.1 我们第一个分布式代码
 
-Elixir ships with facilities to connect nodes and exchange information between them. In fact, we use the same concepts of processes, message passing and receiving messages when working in a distributed environment because Elixir processes are *location transparent*. This means that when sending a message, it doesn't matter if the recipient process is on the same node or on another node, the VM will be able to deliver the message in both cases.
+Elixir提供了节点间连接和交换信息的工具。实际上，在分布式环境下，进程、消息传递和接收这些概念都不变，因为 Elixir进程是*位置透明*。也就是说发送一个消息时，接收消息的进程在相同或不同的节点不重要，虚拟机都可以传递消息。
 
-In order to run distributed code, we need to start the VM with a name. The name can be short (when in the same network) or long (requires the full computer address). Let's start a new IEx session:
+为了执行分布式代码，需要以一个名字启动虚拟机。名字可短（相同网络环境下）可长（需要完整计算机地址）。让我们启动一个新的IEx会话：
 
     $ iex --sname foo
 
-You can see now the prompt is slightly different and shows the node name followed by the computer name:
+现在可以看到提示符发生了一些变化，计算机名后显示了节点名称：
 
     Interactive Elixir - press Ctrl+C to exit (type h() ENTER for help)
     iex(foo@jv)1>
 
-My computer is named `jv`, so I see `foo@jv` in the example above, but you will get a different result. We will use `jv@computer-name` in the following examples and you should update them accordingly when trying out the code.
+我计算机的名字是`jv`，所以上面的例子看到的是`foo@jv`，你会有不同的显示。接下来的例子，我们将使用`jv@computer-name`作为名字，根据尝试的代码你应该更新它们的值。
 
-Let's define a module named `Hello` in this shell:
+让我们在shell里定义一个叫`Hello`模块名：
 
 ```iex
 iex> defmodule Hello do
@@ -47,11 +36,11 @@ iex> defmodule Hello do
 ...> end
 ```
 
-If you have another computer on the same network with both Erlang and Elixir installed, you can start another shell on it. If you don't, you can simply start another IEx session in another terminal. In either case, give it the short name of `bar`:
+如果在相同网络里，有另外一个装好Erlang和Elixir的计算机，你可以开启在这个计算机上开启另一个shell。没有俩电脑的话，直接在另一个终端中开启一个新IEx会话。两种情况下都使用`bar`作为短名字：
 
     $ iex --sname bar
 
-Note that inside this new IEx session, we cannot access `Hello.world/0`:
+注意在新的IEx会话中，我们无法使用`Hello.world/0`函数：
 
 ```iex
 iex> Hello.world
@@ -59,7 +48,7 @@ iex> Hello.world
     Hello.world()
 ```
 
-However we can spawn a new process on `foo@computer-name` from `bar@computer-name`! Let's give it a try (where `@computer-name` is the one you see locally):
+然而我们可以在`bar@computer-name`上给`foo@computer-name`节点生成一个新进程!让我们试一试（`@computer-name`是你本地看到名字）：
 
 ```iex
 iex> Node.spawn_link :"foo@computer-name", fn -> Hello.world end
@@ -67,9 +56,9 @@ iex> Node.spawn_link :"foo@computer-name", fn -> Hello.world end
 hello world
 ```
 
-Elixir spawned a process on another node and returned its pid. The code then executed on the other node where the `Hello.world/0` function exists and invoked that function. Note that the result of "hello world" was printed on the current node `bar` and not on `foo`. In other words, the message to be printed was sent back from `foo` to `bar`. This happens because the process spawned on the other node (`foo`) still has the group leader of the current node (`bar`). We have briefly talked about group leaders in the [IO chapter](/getting_started/12.html).
+Elixir在另外节点生成一个进程然后返回它的进程号。代码将会在其他节点调用已存在的`Hello.world/0`函数。注意到结果"hello world"是在当前节点`bar`而不是`foo`节点打印出来的。换句话说，消息将会从`foo`节点发回到`bar`节点。会发生这样的情况是因为在其他节点(`foo`)生成的进程的进程组长(group leader)是当前节点(`bar`)。我们在[IO章节](http://elixir-lang.org/getting_started/12.html)简要的谈到过进程组长。
 
-We can send and receive message from the pid returned by `Node.spawn_link/2` as usual. Let's try a quick ping-pong example:
+我们照样可以给`Node.spawn_link/2`返回的进程号发送和接收信息。让我们试一试ping-pong：
 
 ```iex
 iex> pid = Node.spawn_link :"foo@computer-name", fn ->
@@ -85,23 +74,23 @@ iex> flush
 :ok
 ```
 
-From our quick exploration, we could conclude that we should simply use `Node.spawn_link/2` to spawn processes on a remote node every time we need to do a distributed computation. However we have learned throughout this guide that spawning processes outside of supervision trees should be avoided if possible, so we need to look for other options.
+以我们的快速的了解,可以得出这样的结论:当需要进行分布式计算时，应该直接使用`Node.spawn_link/2`函数在远程节点上生成进程。然而通过之前的教程学习了应该尽可能的避免在监控树外生成进程，所以我们需要另外的解决方法。
 
-There are three better alternatives to `Node.spawn_link/2` that we could use in our implementation:
+有三个比`Node.spawn_link/2`更好的选择：
 
-1. We could use Erlang's [:rpc](http://erlang.org/doc/man/rpc.html) module to execute functions on a remote node. Inside the `bar@computer-name` shell above, you can call `:rpc.call(:"foo@computer-name", Hello, :world, [])` and it will print "hello world"
+1. 使用Erlang的[:rpc](http://erlang.org/doc/man/rpc.html)模块，进行远程节点调用执行。在`bar@computer-name`节点的shell中调用`:rpc.call(:"foo@computer-name", Hello, :world, [])`将会打印"hello world"信息。
 
-2. We could have a server running on the other node and send requests to that node via the [GenServer](/docs/stable/elixir/GenServer.html) API. For example, you can call a remote named server using `GenServer.call({name, node}, arg)` or simply passing the remote process PID as first argument
+2. 让服务器运行在其他节点，然后使用[GenServer](http://elixir-lang.org/docs/stable/elixir/GenServer.html)API向这个节点发送请求。例如，你可以使用`GenServer.call({name, node}, arg)`函数向一个远程命名服务器发送请求，或者直接将远端的进程号作为第一个参数进行传递。
 
-3. We could use tasks, which we have learned about in the previous chapter, as they can be spawned on both local and remote nodes
+3. 上一章使用的任务(tasks)模块，因为在本地和远程节点都可以生成。
 
-The options above have different properties. Both `:rpc` and using a GenServer would serialize your requests on a single server, while tasks are effectively running asynchronously on the remote node, with the only serialization point being the spawning done by the supervisor.
+上面的方法有不同的特点。使用通用服务器和`:rpc`将会在一个单独的服务器依次接收请求，任务则很有效率的在远程节点异步执行，只有生成进程是由监控器依次完成。
 
-For our routing layer, we are going to use tasks, but feel free to explore the other alternatives too.
+对与我们的路由层，将使用任务模块，你也可以尝试使用其他方法。
 
-## 10.2 async/await
+## 10.2 异步/等待
 
-So far we have explored tasks that are started and run in isolation, with no regard for their return value. However, sometimes it is useful to run a task to compute a value and read its result later on. For this, tasks also provide the `async/await` pattern:
+目前我们已经知道任务是隔离运行且对于返回值是不关心的。然而，有时候执行计算任务并读取返回的结果也是很有用的。因此，任务模块同样提供了`async/await`模式：
 
 ```elixir
 task = Task.async(fn -> compute_something_expensive end)
@@ -109,7 +98,7 @@ res  = compute_something_else()
 res + Task.await(task)
 ```
 
-`async/await` provides a very simple mechanism to compute values concurrently. Not only that, `async/await` can also be used with the same [`Task.Supervisor`](/docs/stable/elixir/Task.Supervisor.html) we have used in previous chapters. We just need to call `Task.Supervisor.async/2` instead of `Task.Supervisor.start_child/2` and use `Task.await/2` to read the result later on.
+`async/await`为计算提供了一个非常简单的并行机制。不仅如此，和之前章节一样，`async/await`也可以用来和[`Task.Supervisor`](http://elixir-lang.org/docs/stable/elixir/Task.Supervisor.html)搭配。只需要将`Task.Supervisor.start_child/2`代替为`Task.Supervisor.async/2`，用`Task.await/2`读取结果。
 
 ## 10.3 Distributed tasks
 
