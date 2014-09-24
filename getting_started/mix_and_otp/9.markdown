@@ -340,7 +340,7 @@ defp format_msg({:error, _}), do: "ERROR\r\n"
 
 `KVServer.Command.run/1`的实现是直接发送命令到在`:kv`程序中注册的，叫`KV.Registry`的服务器。意思是这个服务器是全局的，如果同一时间有两个测试发送消息，测试将会冲突（很可能测试失败）。需要决定是做有隔离的异步执行单元测试，还是在全局状态之上写集成测试，毕竟测试全栈程序意味在生产环境中进行。
 
-So far we have been chosing the unit test approach. For example, in order to make `KVServer.Command.run/1` testable as a unit we would need to change its implementation to not send commands directly to the `KV.Registry` process but instead pass a server as argument. This means we would need to change `run`'s signature to `def run(command, pid)` and the implementation for the `:create` command would look like:
+现在我们选择使用单元测试的方法。例如，我们需要修改代码让`KVServer.Command.run/1`可测试，得给服务器传递参数而不是直接向`KV.Registry`进程发送命令。意味着我们需要把`run`修改为`def run(command, pid)`，`:create`命令如下所示：
 
 
 ```elixir
@@ -350,22 +350,22 @@ def run({:create, bucket}, pid) do
 end
 ```
 
-Then in `KVServer.Command`'s test case, we would need to start an instance of the `KV.Registry`, similar to what we've done in `apps/kv/test/kv/registry_test.exs`, and pass it as an argument to `run/2`.
+在`KVServer.Command`测试用例中，我们需要启动一个`KV.Registry`实例。和在`apps/kv/test/kv/registry_test.exs`测试中所做的类似，将它作为参数传递给`run/2`。
 
-This has been the approach we have taken so far in our tests, and it has some benefits:
+目前我们测试使用的方法，有以下几个好处：
 
-1. Our implementation is not coupled to any particular server name
-2. We can keep our tests running asynchronously, because there is no shared state
+1. 我们的实现没有和任意一个特殊的服务器名耦合。
+2. 我们可以让测试异步执行，因为无状态共享。
 
-However, it comes with the downside that our APIs become increasingly large in order to accommodate all external parameters.
+然而，不好的方面是为了适应所有外部参数，我们的API变的很大。
 
-The alternative is to continue relying on the global server names and run tests against the global data, ensuring we clean up the data in between the tests. In this case, since the test would exercise the whole stack, from the TCP server, to the command parsing and running, to the registry and finally reaching the bucket, it becomes an integration test.
+另一个方法是继续使用全局服务器名，对全局数据进行测试，并确保测试之间进行数据清理。这种情况会测试整个栈，从TCP服务器、命令解析和执行、到注册表和“桶”进程，所以它就成了集成测试。
 
-The downside of integration tests is that they can be much slower than unit tests, and as such they must be used more sparingly. For example, we should not use integration tests to test an edge case in our command parsing implementation.
+集成测试缺点是比单元测试慢，因此要尽量少用。例如，我们不应该使用集成测试来测试我们命令解析的边界用例。
 
-Since we have used unit tests so far, this time we will take the other road and write an integration test. The integration test will have a TCP client that sends commands to our server and we will assert that we are getting the desired responses.
+鉴于我们之前用过单元测试，这次选择另一条路，写集成测试。集成测试使用一个向服务器发送命令的TCP客户端，然后断言得到我们想要的回应。
 
-Let's implement our integration test in `test/kv_server_test.exs` as shown below:
+让我们在`test/kv_server_test.exs`中实现集成测试，代码如下：
 
 ```elixir
 defmodule KVServerTest do
@@ -401,10 +401,6 @@ defmodule KVServerTest do
 
     assert send_and_recv(socket, "DELETE shopping eggs\r\n") ==
            "OK\r\n"
-
-    # GET returns two lines
-    assert send_and_recv(socket, "GET shopping eggs\r\n") == "\r\n"
-    assert send_and_recv(socket, "") == "OK\r\n"
   end
 
   defp send_and_recv(socket, command) do
@@ -415,15 +411,15 @@ defmodule KVServerTest do
 end
 ```
 
-Our integration test checks all server interaction, including unknown commands and not found errors. It is worth noting that, as with ETS tables and linked processes, there is no need to close the socket. Once the test process exits, the socket is automatically closed.
+我们的集成测试检查所有与服务器的交互,包括了未知命令和未找到错误。值得注意的是，因为ETS表和链接的进程，我们不需要关闭socket。一旦测试进程退出，socket也就自动关闭了。
 
-This time, since our test relies on global data, we have not given `async: true` to `use ExUnit.Case`. Furthermore, in order to guarantee our test is always in a clean state, we stop and start the `:kv` application before each test. In fact, stopping the `:kv` application even prints a warning on the terminal:
+因为这次测试依赖于全局数据，我们没有给`use ExUnit.Case`添加`async: true`选项。进一步讲，为了保证测试总是处于干净的状态，测试之前我们先停止再启动`:kv`程序。实际上，停止`:kv`程序甚至在终端打印出了告警：
 
 ```
 18:12:10.698 [info] Application kv exited with reason :stopped
 ```
 
-If desired, we can avoid printing this warning by turning the error_logger off and on in the test setup:
+如果需要，我们可以避免打印这个告警信息，在测试的setup回调中关闭`error_logger`：
 
 ```elixir
 setup do
@@ -435,10 +431,10 @@ setup do
 end
 ```
 
-With this simple integration test, we start to see why integration tests may be slow. Not only can this particular test not be run asynchronously, it also requires the expensive setup of stopping and starting the `:kv` application.
+通过这个简单的集成测试，我们开始了解为什么集成测试会变慢。这个测试不仅不能异步执行，而且需要设置很耗时间的停止和启动`:kv`程序。
 
-At the end of the day, it is up to you and your team to figure out the best testing strategy for your applications. You need to balance code quality, confidence, and test suite runtime. For example, we may start with testing the server only with integration tests, but if the server continues to grow in future releases, or it becomes a part of the application with frequent bugs, it is important to consider breaking it apart and writing more intensive unit tests that don't have the weight of an integration test.
+最后，对你程序来说，什么是最佳的测试策略，取决与你和你的team。你需要在代码质量、信心和测试用例的时间之间找到平衡点。例如，初期可以只使用集成测试来测试，但服务器在之后的版本中不断变大，或它成为经常有bug的程序的一部分的时候，考虑将它分割，写一些没有集成测试那么重的、更密集的单元测试就变的非常重要。
 
-I personally err on the side of unit tests, and have integration tests only as smoke tests to guarantee the basic skeleton of the system works.
+我个人更愿意使用单元测试，只有在做烟雾测试保证系统基本功能的情况下使用集成测试。
 
-In the next chapter we will finally make our system distributed by adding a bucket routing mechanism. We'll also learn about application configuration.
+下一章，我们将最后增加一个分布式“桶”路由机制，同时也会学习配置程序。

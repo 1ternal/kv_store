@@ -30,13 +30,20 @@ defmodule KVServer do
   end
 
   defp serve(socket) do
-    import Pipe
     msg =
-      pipe_matching x, {:ok, x},
-        read_line(socket)
-        |> KVServer.Command.parse()
-        |> KVServer.Command.run()
-    write_line(socket,msg)
+      case read_line(socket) do
+        {:ok, data} ->
+          case KVServer.Command.parse(data) do
+            {:ok, command} ->
+              KVServer.Command.run(command)
+            {:error, _} = err ->
+              err
+          end
+        {:error, _} = err ->
+          err
+      end
+
+    write_line(socket, msg)
     serve(socket)
   end
 
