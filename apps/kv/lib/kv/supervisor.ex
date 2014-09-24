@@ -17,7 +17,8 @@ defmodule KV.Supervisor do
       worker(GenEvent, [[name: @manager_name]]),
       supervisor(KV.Bucket.Supervisor, [[name: @bucket_sup_name]]),
       worker(KV.Registry, [@ets_registry_name, @manager_name, @bucket_sup_name,
-                          [name: @registry_name]])
+                          [name: @registry_name]]),
+      supervisor(Task.Supervisor, [[name: KV.RouterTasks]])
     ]
 
     supervise(children, strategy: :one_for_one)
