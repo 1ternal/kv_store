@@ -247,15 +247,15 @@ ExUnit.start(exclude: exclude)
 
     $ elixir --sname foo -S mix test --only distributed
 
-你可以在[`ExUnit.Case`模块文档](/docs/stable/ex_unit/ExUnit.Case.html)中读到更多关于过滤器、标签和默认标签。
+你可以在[`ExUnit.Case`模块文档](http://elixir-lang.org/docs/stable/ex_unit/ExUnit.Case.html)中读到更多关于过滤器、标签和默认标签。
 
-## 10.6 Application environment and configuration
+## 10.6 程序环境与配置
 
-So far we have hardcoded the routing table into the `KV.Router` module. However, we would like to make the table dynamic. This allows us not only to configure development/test/production, but also to allow different nodes to run with different entries in the routing table. There is a feature of OTP that does exactly that: the application environment.
+目前我们将路由表硬编码进了`KV.Router`模块。然而，我们需要动态的路由表，这样我们就不仅可以配置开发/测试/生产，而且允许不同的节点拥有不同的路由表条目。OTP提供了这样的功能：程序环境。
 
-Each application has an environment that stores the application specific configuration by key. For example, we could store the routing table in the `:kv` application environment, giving it a default value and allowing other applications to change the table as needed.
+每个应用程序都有一个环境存储特定于应用程序的配置。例如，我们可以在`:kv`程序环境存储路由表，设置默认值、需要的时候允许其他程序进行修改。
 
-Open up `apps/kv/mix.exs` and change the `application/0` function to return the following:
+打开`apps/kv/mix.exs`文件，修改`application/0`函数：
 
 ```elixir
 def application do
@@ -265,9 +265,9 @@ def application do
 end
 ```
 
-We have added a new `:env` key to the application. It returns the application default environment, which has an entry of key `:routing_table` and value of an empty list. It makes sense for the application environment to ship with an empty table, as the specific routing table depends on the testing/deployment structure.
+我们给程序增加了一个新的`:env`键，它返回一个一个以`:routing_table`为键,空列表为值的条目的应用程序默认环境。因为路由表取决于测试/部署结构，所以给应用程序环境带上一个空的路由表是合理的。
 
-In order to use the application environment in our code, we just need to replace `KV.Router.table/0` with the definition below:
+为了在代码中使用程序环境变量，我们只需要用下面的定义代替`KV.Router.table/0`:
 
 ```elixir
 @doc """
@@ -278,22 +278,22 @@ def table do
 end
 ```
 
-We use `Application.get_env/2` to read the entry for `:routing_table` in `:kv`'s environment. You can find more information and other functions to manipulate the app environment in the [Application module](/docs/stable/elixir/Application.html).
+我们使用`Application.get_env/2`函数读取`:kv`环境的`:routing_table`条目。你可以在[程序模块](http://elixir-lang.org/docs/stable/elixir/Application.html)找到更多处理程序环境变量的信息和函数。
 
-Since our routing table is now empty, our distributed test should fail. Restart the apps and re-run tests to see the failure:
+因为我们的路由表现在是空的，分布式的代码测试就会失败。重启程序并重新执行测试可以看到测试失败：
 
     $ iex --sname bar -S mix
     $ elixir --sname foo -S mix test --only distributed
 
-The interesting thing about the application environment is that it can be configured not only for the current application, but for all applications. Such configuration is done by the `config/config.exs` file. For example, we can configure IEx default prompt to another value. Just open `apps/kv/config/config.exs` and add the following to the end:
+有趣的是不仅可以修改当前程序的环境变量，还可以修改所有程序的环境变量。可以通过`config/config.exs`文件实现。例如，我们可以将IEx默认提示符修改为其他值。只要打开`apps/kv/config/config.exs`文件，追加下面的内容：
 
 ```elixir
 config :iex, default_prompt: ">>>"
 ```
 
-Start IEx with `iex -S mix` and you can see that the IEx prompt has changed.
+用`iex -S mix`打开IEx就可以看到提示符的变化。
 
-This means we can configure our `:routing_table` directly in the `config/config.exs` file as well:
+也就是说同样可以直接在`config/config.exs`文件内设置`:routing_table`：
 
 ```elixir
 # Replace computer-name with your local machine nodes.
@@ -302,38 +302,38 @@ config :kv, :routing_table,
         {?n..?z, :"bar@computer-name"}]
 ```
 
-Restart the nodes and run distributed tests again. Now they should all pass.
+重启节点后再次执行分布式代码测试，现在就应该全部通过。
 
-Each application has its own `config/config.exs` file and they are not shared in any way. Configuration can also be set per environment. Read the contents of the config file for the `:kv` application for more information on how to do so.
+每个程序都有自己的`config/config.exs`文件，它们之间是不共享的。配置可以针对每个环境设置。阅读`:kv`程序内配置文件的内容你就会知道怎么做。
 
-Since config files are not shared, if you run tests from the umbrella root, they will fail because the configuration we just added to `:kv` is not available there. However, if you open up `config/config.exs` in the umbrella, it has instructions on how to import config files from children applications. You just need to invoke:
+基于配置文件不共享，当你从雨伞程序根目录执行测试，测试将会失败，因为我们刚刚增加的`:kv`在雨伞程序内是不可用的。但是打开雨伞项目的`config/config.exs`文件，就能看到如何从其他子程序导入配置。你只需要调用：
 
 ```elixir
 import_config "../apps/kv/config/config.exs"
 ```
 
-The `mix run` command also accepts a `--config` flag, which allows configuration files to be given on demand. This could be used to start different nodes, each with its own specific configuration (for example, different routing tables).
+`mix run`命令也接受一个`--config`参数，允许按需载入配置文件。可用来根据每个节点自己特殊的配置（例如，不同的路由表）启动节点。
 
-Overall, the built-in ability to configure applications and the fact that we have built our software as an umbrella application gives us plenty of options when deploying the software. We can:
+综合来说，内置的配置程序能力和以雨伞程序方式打造的软件在部署时给了我们很多选择，我们可以：
 
-* deploy the umbrella application to a node that will work as both TCP server and key-value storage
+* 部署雨伞程序到一个节点，同时作为TCP服务器和键值存储
 
-* deploy the `:kv_server` application to work only as a TCP server as long as the routing table points only to other nodes
+* 部署`:kv_server`程序，只用做TCP服务器且路由表只指向其他节点
 
-* deploy only the `:kv` application when we want a node to work only as storage (no TCP access)
+* 当我们只需要一个存储节点的时候（无TCP连接）只部署`:kv`程序
 
-As we add more applications in the future, we can continue controlling our deploy with the same level of granularity, cherry-picking which applications with which configuration are going to production. We can also consider building multiple releases with a tool like [exrm](https://github.com/bitwalker/exrm), which will package the chosen applications and configuration, including the current Erlang and Elixir installations, so we can deploy the application even if the runtime is not pre-installed on the target system.
+在未来增加更多的应用程序,我们可以继续控制相同的粒度的部署,挑选哪些应用程序的配置用于生产环境。也可以考虑使用像[exrm](https://github.com/bitwalker/exrm)这样的工具像建立多个版本,将选择的程序和配置，包括Erlang和Elixir的安装进行打包，这样就算目标系统上没预装运行环境，我们也能进行程序部署。
 
-Finally, we have learned some new things in this chapter, and they could be applied to the `:kv_server` application as well. We are going to leave the next steps as an exercise:
+最后，我们已经在本章学习了一些新东西，可以使用在`:kv_sever`程序上。我们将把下个步骤当做练习：
 
-* change the `:kv_server` application to read the port from its application environment instead of using the hardcoded value of 4040
+* 修改`:kv_server`，让它从程序环境变量读取端口号，取代使用硬编码端口值4040。
 
-* change and configure the `:kv_server` application to use the routing functionality instead of dispatching directly to the local `KV.Registry`. For `:kv_server` tests, you can make the routing table simply point to the current node itself
+* 修改和配置`:kv_server`程序，使用路由功能代替直接分发到本地`KV.Registry`。对`:kv_server`测试，你可以让路由表直接指向自己当前节点。
 
-## 10.7 Summing up
+## 10.7 总结
 
-In this chapter we have built a simple router as a way to explore the distributed features of Elixir and the Erlang VM, and learned how to configure its routing table. This is the last chapter in our Mix and OTP guide.
+在这一章里,我们通过建立了一个简单的路由器来了解Elixir和Erlang虚拟机的分布式特性，并且学习了如何配置路由表。这是Mix和OTP教程的最后一章节。
 
-Throughout the guide, we have built a very simple distributed key-value store as an opportunity to explore many constructs like generic servers, event managers, supervisors, tasks, agents, applications and more. Not only that, we have written tests for the whole application, getting familiar with ExUnit, and learned how to use the Mix build tool to accomplish a wide range of tasks.
+通过本教程，我们已经构建了一个简单的分布式键值存储，借此机会也了解更多的像通用服务器，事件管理器，监控器，任务、agent和程序等这样的概念。不仅如此，我们也为整个程序写了测试，熟悉了ExUnit，也学习了如何使用构建工具Mix完成广泛的任务。
 
-If you are looking for a distributed key-value store to use in production, you should definitely look into [Riak](http://basho.com/riak/), which also runs in the Erlang VM. In Riak, the buckets are replicated, to avoid data loss, and instead of a router, they use [consistent hashing](http://en.wikipedia.org/wiki/Consistent_hashing) to map a bucket to a node. A consistent hashing algorithm helps reduce the amount of data that needs to be migrated when new nodes to store buckets are added to your infrastructure.
+如果你在为生产环境寻找一个分布式键值存储程序，你肯定应该看看建立在Erlang虚拟机之上的[Riak](http://basho.com/riak/)。在Riak,为防止数据丢失，“桶”是被复制的；取代路由器，使用[一致哈希](http://zh.wikipedia.org/wiki/%E4%B8%80%E8%87%B4%E5%93%88%E5%B8%8C)将”桶“映射到节点。当存储桶的新节点被添加进来的时候，一致哈希算法有助于减少迁移的数据量。　

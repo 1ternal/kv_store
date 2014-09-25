@@ -30,7 +30,6 @@ use Mix.Config
 # in the apps directory when commands are executed from the umbrella
 # project. For this reason, it is preferred to configure each child
 # application directly and import its configuration, as done below.
-import_config "../apps/*/config/config.exs"
 
 # Sample configuration (overrides the imported configuration above):
 #
@@ -38,3 +37,6 @@ import_config "../apps/*/config/config.exs"
 #       level: :info,
 #       format: "$date $time [$level] $metadata$message\n",
 #       metadata: [:user_id]
+config :kv, :routing_table,
+       [{?a..?m, :"foo@computer-name"},
+        {?n..?z, :"bar@computer-name"}]
